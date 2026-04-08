@@ -212,19 +212,39 @@ function Select({ label, value, onChange, options }) {
 // ── AI ────────────────────────────────────────────────────────────────────
 async function callClaude(system, user, json) {
   const apiKey = window._COFFEE_API_KEY;
-  if (!apiKey) return json ? null : "⚠️ No API key. Tap ⚙ to add your Anthropic API key.";
+  if (!apiKey) return json ? null : "⚠️ No API key set. Tap the ⚙ gear button in the top right to add your Anthropic API key (starts with sk-ant-).";
   try {
     const res = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
-      headers: { "Content-Type": "application/json", "x-api-key": apiKey, "anthropic-version": "2023-06-01", "anthropic-dangerous-direct-browser-access": "true" },
-      body: JSON.stringify({ model: "claude-sonnet-4-20250514", max_tokens: 1000, system, messages: [{ role: "user", content: user }] }),
+      headers: {
+        "Content-Type": "application/json",
+        "x-api-key": apiKey,
+        "anthropic-version": "2023-06-01",
+        "anthropic-dangerous-direct-browser-access": "true"
+      },
+      body: JSON.stringify({
+        model: "claude-sonnet-4-20250514",
+        max_tokens: 1000,
+        system: system,
+        messages: [{ role: "user", content: user }]
+      }),
     });
+    if (!res.ok) {
+      const errText = await res.text();
+      return json ? null : "API error " + res.status + ": " + errText.slice(0, 200);
+    }
     const d = await res.json();
-    if (d.error) return json ? null : "Error: " + d.error.message;
+    if (d.error) return json ? null : "API error: " + d.error.message;
     const text = d.content?.map(b => b.text || "").join("") || "";
     if (json) { try { return JSON.parse(text.replace(/```json|```/g, "").trim()); } catch { return null; } }
     return text;
-  } catch (e) { return json ? null : "Connection error: " + e.message; }
+  } catch (e) {
+    const msg = e.message || String(e);
+    if (msg.includes("NetworkError") || msg.includes("Failed to fetch") || msg.includes("Load failed")) {
+      return json ? null : "⚠️ Network blocked. Safari home screen apps sometimes block external API calls. Try opening the app in Safari browser instead of from your home screen icon, or check Settings > Safari > Advanced > Experimental Features.";
+    }
+    return json ? null : "Error: " + msg;
+  }
 }
 
 const SYSTEM = `You are an expert specialty coffee consultant. Equipment: La Marzocco Linea Micra, Mahlkonig E64S (calibrated — 0-1 range for espresso, full 0-12 for manual methods, 5 dots between numbers), Hario V60 with metal filter, standard AeroPress, temperature-controlled kettle, RO water with Third Wave espresso minerals. Give specific, actionable advice. 3-5 bullet points max. No fluff.`;
@@ -970,12 +990,24 @@ Return JSON with these exact keys (use empty string if unknown):
         <div className="modal-overlay" onClick={() => setShowApiModal(false)}>
           <div className="modal" onClick={e => e.stopPropagation()}>
             <h2>API Key</h2>
-            <p>Required for AI Recipe, Diagnose, Bean Info Sheet, and URL Import. Stored locally on this device only.</p>
-            <p>Get your key at <strong>console.anthropic.com</strong></p>
-            <input type="password" placeholder="sk-ant-..." value={apiKeyInput} onChange={e => setApiKeyInput(e.target.value)} onKeyDown={e => e.key === "Enter" && saveApiKey()} />
-            <div className="fa">
-              <button className="btn p" onClick={saveApiKey}>Save</button>
+            <p>Required for AI features. Stored locally on this device only. Never shared.</p>
+            <p style={{marginBottom:8}}>Get your key at <strong>console.anthropic.com</strong> → API Keys → Create Key</p>
+            {window._COFFEE_API_KEY
+              ? <p style={{color:"var(--green)",marginBottom:8,fontSize:11}}>✓ Key saved: {window._COFFEE_API_KEY.slice(0,12)}...</p>
+              : <p style={{color:"var(--red)",marginBottom:8,fontSize:11}}>✗ No key saved yet</p>
+            }
+            <input type="text" placeholder="sk-ant-api03-..." value={apiKeyInput} onChange={e => setApiKeyInput(e.target.value)} onKeyDown={e => e.key === "Enter" && saveApiKey()} />
+            <div className="fa" style={{marginBottom:12}}>
+              <button className="btn p" onClick={saveApiKey}>Save Key</button>
               <button className="btn" onClick={() => setShowApiModal(false)}>Cancel</button>
+            </div>
+            <div style={{borderTop:"1px solid var(--border)",paddingTop:12}}>
+              <p style={{marginBottom:8,fontSize:10,color:"var(--muted)"}}>Test your key:</p>
+              <button className="btn ai" style={{width:"100%"}} onClick={async () => {
+                window._COFFEE_API_KEY = apiKeyInput.trim() || window._COFFEE_API_KEY;
+                const r = await callClaude("You are a helpful assistant.", "Say only: API key working!");
+                alert(r);
+              }}>Test Connection</button>
             </div>
           </div>
         </div>
