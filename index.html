@@ -124,11 +124,47 @@ const seedBeans = [
   },
 ];
 
+const STORAGE_KEY = "coffeeLog_v6";
+const LEGACY_KEYS = ["coffeeLog_v5","coffeeLog_v4","coffeeLog_v3","coffeeLog_beans_v3","coffeeLog_beans_v4"];
+
+function migrateLegacyBean(b) {
+  // Ensure all new fields exist on old beans
+  const migrated = {
+    roastDate: "", imageUrl: "", rating: 0,
+    altitude: "", varietal: "", flavorProfile: "",
+    ...b,
+    methods: {
+      espresso: { ...defaultParams.espresso, ...(b.methods?.espresso || {}) },
+      aeropress: { ...defaultParams.aeropress, ...(b.methods?.aeropress || {}) },
+      pourover: { ...defaultParams.pourover, ...(b.methods?.pourover || {}) },
+    },
+    grindLogs: {
+      espresso: b.grindLogs?.espresso || [],
+      aeropress: b.grindLogs?.aeropress || [],
+      pourover: b.grindLogs?.pourover || [],
+    }
+  };
+  return migrated;
+}
+
 function loadBeans() {
-  try { const r = localStorage.getItem("coffeeLog_v6"); if (r) return JSON.parse(r); } catch {}
+  try {
+    // Try current key first
+    const r = localStorage.getItem(STORAGE_KEY);
+    if (r) return JSON.parse(r).map(migrateLegacyBean);
+    // Try legacy keys in order
+    for (const key of LEGACY_KEYS) {
+      const legacy = localStorage.getItem(key);
+      if (legacy) {
+        const beans = JSON.parse(legacy).map(migrateLegacyBean);
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(beans));
+        return beans;
+      }
+    }
+  } catch(e) { console.error("Load error:", e); }
   return seedBeans;
 }
-function saveBeans(b) { try { localStorage.setItem("coffeeLog_v6", JSON.stringify(b)); } catch {} }
+function saveBeans(b) { try { localStorage.setItem(STORAGE_KEY, JSON.stringify(b)); } catch {} }
 
 function daysAgo(dateStr) {
   if (!dateStr) return null;
@@ -448,7 +484,19 @@ function App() {
   const setAiResult = (val) => setAiResults(prev => ({ ...prev, [aiResultKey(activeTab)]: val }));
 
   const upd = fn => setBeans(prev => { const next = fn(prev); saveBeans(next); return next; });
-  const selectBean = id => { setSelectedId(id); setShowList(false); setEditing(false); setAdding(false); setActiveTab("shot"); setAiResults({ recipe_aeropress: "", recipe_pourover: "", diagnose_espresso: "", diagnose_aeropress: "", diagnose_pourover: "" }); setDiagInput(""); setUrlImport(null); setCompassSelected(null); };
+  const selectBean = id => {
+    setSelectedId(id);
+    setShowList(false);
+    setEditing(false);
+    setAdding(false);
+    setActiveTab("shot");
+    setAiResults({ recipe_aeropress: "", recipe_pourover: "", diagnose_espresso: "", diagnose_aeropress: "", diagnose_pourover: "" });
+    setDiagInput("");
+    setUrlImport(null);
+    setCompassSelected(null);
+    // Scroll detail to top
+    setTimeout(() => { const d = document.querySelector(".detail"); if (d) d.scrollTop = 0; }, 50);
+  };
   const startAdd = () => { setBeanDraft({ roaster: "", name: "", origin: "", process: "", roast: "", altitude: "", varietal: "", flavorProfile: "", roastDate: "", imageUrl: "", rating: 0 }); setAdding(true); setEditing(false); setShowList(false); setUrlImport(null); setUrlInput(""); };
   const saveNew = () => {
     if (!beanDraft.name) return;
@@ -883,7 +931,7 @@ function App() {
             </div>
           )}
 
-          {!adding && !current && <div className="empty" style={{paddingTop:60}}>Select a bean to get started</div>}
+          {!adding && !current && !isMobile && <div className="empty" style={{paddingTop:60}}>← Select a bean to get started</div>}
 
           {!adding && current && (
             <>
