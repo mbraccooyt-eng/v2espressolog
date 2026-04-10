@@ -409,7 +409,16 @@ async function callClaude(system, user, json) {
   }
 }
 
-const SYSTEM = `You are an expert specialty coffee consultant. Equipment: La Marzocco Linea Micra, Mahlkonig E64S (calibrated — 0-1 range for espresso, full 0-12 for manual methods, 5 dots between numbers), Hario V60 with metal filter, standard AeroPress (max 220g water capacity), temperature-controlled kettle, RO water with Third Wave espresso minerals. IMPORTANT: All AeroPress recipes must use 220g water maximum. Give specific, actionable advice. 3-5 bullet points max. No fluff.`;
+const SYSTEM = `You are an expert specialty coffee consultant. Equipment: La Marzocco Linea Micra, Mahlkonig E64S (calibrated — 0-1 range for espresso, full 0-12 for manual methods, 5 dots between numbers), Hario V60 with metal filter, standard AeroPress (max 220g water capacity), temperature-controlled kettle, RO water with Third Wave espresso minerals. IMPORTANT: All AeroPress recipes must use 220g water maximum.
+
+CRITICAL DIAGNOSIS RULES — always follow these:
+- If shot time is SLOW (>35s): never recommend going finer. Recommend coarser grind or better puck prep.
+- If shot time is FAST (<22s): never recommend going coarser first. Recommend finer grind.
+- If sour + slow: this almost always indicates CHANNELING, not simple under-extraction. Recommend puck prep improvements first, not finer grind.
+- If bitter + fast: indicates over-extraction. Recommend coarser grind, lower temp, or shorter yield.
+- Never contradict the shot time. Always reason from the actual numbers given.
+- Sour does NOT always mean under-extracted — consider the full picture including shot time and body.
+- Give specific, actionable advice. 3-5 bullet points max. No fluff. Always reference the actual grind setting and shot time in your advice.`;
 
 // ── BEAN INFO SHEET ──
 function BeanInfoSheet({ bean }) {
@@ -466,6 +475,8 @@ function App() {
   const [urlLoading, setUrlLoading] = useState(false);
   const [urlImport, setUrlImport] = useState(null);
   const [compassSelected, setCompassSelected] = useState(null);
+  const [shotTime, setShotTime] = useState("");
+  const [shotYield, setShotYield] = useState("");
 
   useEffect(() => {
     const check = () => setIsMobile(window.innerWidth < 680);
@@ -494,6 +505,8 @@ function App() {
     setDiagInput("");
     setUrlImport(null);
     setCompassSelected(null);
+    setShotTime("");
+    setShotYield("");
     // Scroll detail to top
     setTimeout(() => { const d = document.querySelector(".detail"); if (d) d.scrollTop = 0; }, 50);
   };
@@ -537,8 +550,10 @@ function App() {
     if (!diagInput.trim() && !compassSelected) return;
     setAiLoading(true); setAiResult("");
     const compassCtx = compassSelected ? `\nEspresso compass selection: ${compassSelected.label} — ${compassSelected.desc}` : "";
+    const timeStr = shotTime ? shotTime + "s" : md.time + "s (logged)";
+    const yieldStr = shotYield ? shotYield + "g" : md.yield + "g (logged)";
     const ctx = activeMethod === "espresso"
-      ? `Bean: ${current.name} (${current.roaster}), ${current.origin}, ${current.process}, ${current.roast}. Espresso: ${md.dose}g in / ${md.yield}g out / ${md.time}s / ${md.temp}°F. Pre-brew: ${md.preBrew}. Grind: ${grindLabel(latestGrind?.position)}.${compassCtx}`
+      ? `Bean: ${current.name} (${current.roaster}), ${current.origin}, ${current.process}, ${current.roast}. Espresso setup: ${md.dose}g dose / ${md.temp}°F / grind ${grindLabel(latestGrind?.position)} / pre-brew ${md.preBrew}. THIS SHOT: time=${timeStr}, yield=${yieldStr}. ${shotTime && parseInt(shotTime) > 35 ? "NOTE: Shot ran SLOW — do not recommend going finer." : shotTime && parseInt(shotTime) < 22 ? "NOTE: Shot ran FAST — do not recommend going coarser." : ""}${compassCtx}`
       : activeMethod === "aeropress"
       ? `Bean: ${current.name}, ${current.process}, ${current.roast}. AeroPress: ${md.dose}g / ${md.water}g / ${md.temp}°F / steep ${md.steepTime}s / press ${md.pressTime}s. Inverted: ${md.inverted}. Bloom: ${md.bloom} ${md.bloomTime}s. Grind: ${grindLabel(latestGrind?.position)}.`
       : `Bean: ${current.name}, ${current.process}, ${current.roast}. Pour Over V60 metal filter: ${md.dose}g / ${md.water}g / ${md.temp}°F / bloom ${md.bloomAmount}g ${md.bloomTime}s / total ${md.totalTime}. Grind: ${grindLabel(latestGrind?.position)}.`;
@@ -1084,12 +1099,24 @@ function App() {
                     )}
                     <div className="sec-lbl" style={{marginBottom:6}}>Describe Your Cup</div>
                     <div className="sec-txt" style={{marginBottom:10,fontSize:12}}>Use the compass above and/or describe what you're tasting.</div>
+                    {activeMethod==="espresso" && (
+                      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,marginBottom:10}}>
+                        <div className="field">
+                          <label>Shot Time (s)</label>
+                          <input className="field input" value={shotTime} onChange={e => setShotTime(e.target.value)} placeholder="e.g. 32" style={{background:"#1a1628",border:"1px solid #3a2e50",color:"#d0c8e8",fontFamily:"'DM Mono',monospace",fontSize:16,padding:"9px 11px",outline:"none",borderRadius:0,WebkitAppearance:"none"}} />
+                        </div>
+                        <div className="field">
+                          <label>Yield (g)</label>
+                          <input className="field input" value={shotYield} onChange={e => setShotYield(e.target.value)} placeholder="e.g. 36" style={{background:"#1a1628",border:"1px solid #3a2e50",color:"#d0c8e8",fontFamily:"'DM Mono',monospace",fontSize:16,padding:"9px 11px",outline:"none",borderRadius:0,WebkitAppearance:"none"}} />
+                        </div>
+                      </div>
+                    )}
                     <textarea className="ai-ta" rows={3}
-                      placeholder={activeMethod==="espresso"?"e.g. 'Too sour, 22s, lacking sweetness...'":activeMethod==="aeropress"?"e.g. 'Muddy, over-extracted...'":"e.g. 'Flat, no clarity, fast drain...'"}
+                      placeholder={activeMethod==="espresso"?"Describe taste, texture, finish — e.g. 'Sour, thin body, cinnamon finish late'":activeMethod==="aeropress"?"e.g. 'Muddy, over-extracted...'":"e.g. 'Flat, no clarity, fast drain...'"}
                       value={diagInput} onChange={e => setDiagInput(e.target.value)} />
                     <div className="fa" style={{marginBottom:14}}>
                       <button className="btn ai" disabled={aiLoading||(!diagInput.trim()&&!compassSelected)} onClick={runDiagnosis}>{aiLoading?"Diagnosing...":"Diagnose"}</button>
-                      {(aiResult||diagInput) && <button className="btn sm" onClick={() => { setAiResult(""); setDiagInput(""); setCompassSelected(null); }}>Clear</button>}
+                      {(aiResult||diagInput) && <button className="btn sm" onClick={() => { setAiResult(""); setDiagInput(""); setCompassSelected(null); setShotTime(""); setShotYield(""); }}>Clear</button>}
                     </div>
                     <AiSection/>
                   </>
