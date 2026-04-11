@@ -3,6 +3,8 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
   <title>Coffee Log</title>
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link href="https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,400;0,700;1,400&family=DM+Mono:wght@300;400;500&display=swap" rel="stylesheet" />
@@ -11,20 +13,21 @@
   <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.2/babel.min.js"></script>
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-    html, body { background: #1a1410; height: 100%; -webkit-text-size-adjust: 100%; }
-    #root { height: 100%; }
+    html, body { background: #1a1410; height: 100%; -webkit-text-size-adjust: 100%; overflow: hidden; }
+    #root { height: 100%; display: flex; flex-direction: column; }
   </style>
 </head>
 <body>
 <div id="root"></div>
 <script type="text/babel">
-const { useState, useEffect, useRef } = React;
+const { useState, useEffect, useRef, useCallback } = React;
 
 const DOTS = 5;
 const GRIND_MAX = 12;
 const METHODS = ["espresso", "aeropress", "pourover"];
 const METHOD_LABELS = { espresso: "Espresso", aeropress: "AeroPress", pourover: "Pour Over" };
-const METHOD_ICONS = { espresso: "☕", aeropress: "🔵", pourover: "🫗" };
+const STORAGE_KEY = "coffeeLog_v6";
+const LEGACY_KEYS = ["coffeeLog_v5","coffeeLog_v4","coffeeLog_v3","coffeeLog_beans_v3"];
 
 const defaultParams = {
   espresso: { dose: "18", yield: "36", time: "28", temp: "200.5", preBrew: "2s on / 2s off", notes: "", whatWorked: "", whatDidnt: "", iced: "" },
@@ -32,13 +35,61 @@ const defaultParams = {
   pourover: { dose: "20", water: "300", temp: "205", bloomAmount: "40", bloomTime: "45", pours: "", totalTime: "3:30", notes: "", whatWorked: "", whatDidnt: "" },
 };
 
-// ── GRIND ──
+// ── HELPERS ──
 function grindLabel(pos) {
   if (!pos) return "—";
   if (pos.dot === 0) return String(pos.whole);
   return pos.whole + "·".repeat(pos.dot);
 }
 
+function daysAgo(dateStr) {
+  if (!dateStr) return null;
+  const d = new Date(dateStr);
+  if (isNaN(d)) return null;
+  const days = Math.floor((Date.now() - d.getTime()) / 86400000);
+  if (days === 0) return "Today";
+  if (days === 1) return "1 day ago";
+  return days + " days ago";
+}
+
+function migrateLegacyBean(b) {
+  return {
+    roastDate: "", imageUrl: "", imageBase64: "", rating: 0,
+    altitude: "", varietal: "", flavorProfile: "", inStock: true, currentlyBrewing: false,
+    savedRecipes: { aeropress: [], pourover: [] },
+    ...b,
+    methods: {
+      espresso: { ...defaultParams.espresso, ...(b.methods?.espresso || {}) },
+      aeropress: { ...defaultParams.aeropress, ...(b.methods?.aeropress || {}) },
+      pourover: { ...defaultParams.pourover, ...(b.methods?.pourover || {}) },
+    },
+    grindLogs: {
+      espresso: b.grindLogs?.espresso || [],
+      aeropress: b.grindLogs?.aeropress || [],
+      pourover: b.grindLogs?.pourover || [],
+    },
+    savedRecipes: b.savedRecipes || { aeropress: [], pourover: [] },
+  };
+}
+
+function loadBeans() {
+  try {
+    const r = localStorage.getItem(STORAGE_KEY);
+    if (r) return JSON.parse(r).map(migrateLegacyBean);
+    for (const key of LEGACY_KEYS) {
+      const legacy = localStorage.getItem(key);
+      if (legacy) {
+        const beans = JSON.parse(legacy).map(migrateLegacyBean);
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(beans));
+        return beans;
+      }
+    }
+  } catch(e) {}
+  return [];
+}
+function saveBeans(b) { try { localStorage.setItem(STORAGE_KEY, JSON.stringify(b)); } catch {} }
+
+// ── GRIND SELECTOR ──
 function GrindSelector({ value, onChange }) {
   const cur = value || { whole: 0, dot: 0 };
   const groups = [];
@@ -64,14 +115,8 @@ function GrindSelector({ value, onChange }) {
   );
 }
 
-// ── RATING ──
+// ── STAR RATING ──
 function StarRating({ value, onChange }) {
-  const steps = [];
-  for (let i = 1; i <= 10; i++) {
-    steps.push(i - 0.75, i - 0.5, i - 0.25, i);
-  }
-  // Display as 5 stars with quarter increments
-  const pct = (value || 0) / 10;
   return (
     <div className="rating-wrap">
       <div className="rating-stars">
@@ -87,129 +132,19 @@ function StarRating({ value, onChange }) {
         })}
       </div>
       <div className="rating-val">{value ? value.toFixed(2).replace(/\.?0+$/, "") + " / 10" : "Not rated"}</div>
-      <div className="rating-slider-wrap">
-        <input type="range" min="0" max="10" step="0.25" value={value || 0}
-          onChange={e => onChange(parseFloat(e.target.value))}
-          className="rating-slider" />
-      </div>
+      <input type="range" min="0" max="10" step="0.25" value={value || 0} onChange={e => onChange(parseFloat(e.target.value))} className="rating-slider" />
     </div>
   );
 }
 
-// ── SEED DATA ──
-const seedBeans = [
-  {
-    id: 1, roaster: "Traffic Coffee", name: "Good Vibrations",
-    origin: "Colombia & Ethiopia", process: "Washed co-ferment & washed", roast: "Medium",
-    altitude: "1730–2250m", varietal: "Purple Caturra & 74111 Heirloom", flavorProfile: "Watermelon, jasmine, rosé",
-    roastDate: "", imageUrl: "", rating: 0,
-    methods: {
-      espresso: { dose: "18", yield: "32", time: "32", temp: "199", preBrew: "2s on / 2s off", notes: "Watermelon, jasmine. Lower temp preserves co-ferment fruit.", whatWorked: "199°F + shorter yield preserves the watermelon.", whatDidnt: "200.5°F muted the character.", iced: "Ristretto 18g/30-32g. Ice → cold water → shot." },
-      aeropress: { ...defaultParams.aeropress },
-      pourover: { ...defaultParams.pourover },
-    },
-    grindLogs: { espresso: [], aeropress: [], pourover: [] },
-  },
-  {
-    id: 2, roaster: "Panther Coffee", name: "East Coast Blend",
-    origin: "Latin American blend", process: "Washed", roast: "Medium",
-    altitude: "", varietal: "", flavorProfile: "Chocolate, caramel, stone fruit",
-    roastDate: "", imageUrl: "", rating: 0,
-    methods: {
-      espresso: { dose: "18", yield: "39", time: "32", temp: "200.5", preBrew: "2s on / 2s off", notes: "Body is solid. Chasing complexity.", whatWorked: "Longer yield (38-40g) + slightly higher temp.", whatDidnt: "1:2 ratio (36g) tastes flat.", iced: "" },
-      aeropress: { ...defaultParams.aeropress },
-      pourover: { ...defaultParams.pourover },
-    },
-    grindLogs: { espresso: [{ id: 1, position: { whole: 0, dot: 2 }, note: "Starting point", date: "Current" }], aeropress: [], pourover: [] },
-  },
-];
-
-const STORAGE_KEY = "coffeeLog_v6";
-const LEGACY_KEYS = ["coffeeLog_v5","coffeeLog_v4","coffeeLog_v3","coffeeLog_beans_v3","coffeeLog_beans_v4"];
-
-function migrateLegacyBean(b) {
-  // Ensure all new fields exist on old beans
-  const migrated = {
-    roastDate: "", imageUrl: "", rating: 0,
-    altitude: "", varietal: "", flavorProfile: "",
-    ...b,
-    methods: {
-      espresso: { ...defaultParams.espresso, ...(b.methods?.espresso || {}) },
-      aeropress: { ...defaultParams.aeropress, ...(b.methods?.aeropress || {}) },
-      pourover: { ...defaultParams.pourover, ...(b.methods?.pourover || {}) },
-    },
-    grindLogs: {
-      espresso: b.grindLogs?.espresso || [],
-      aeropress: b.grindLogs?.aeropress || [],
-      pourover: b.grindLogs?.pourover || [],
-    }
-  };
-  return migrated;
-}
-
-function loadBeans() {
-  try {
-    // Try current key first
-    const r = localStorage.getItem(STORAGE_KEY);
-    if (r) return JSON.parse(r).map(migrateLegacyBean);
-    // Try legacy keys in order
-    for (const key of LEGACY_KEYS) {
-      const legacy = localStorage.getItem(key);
-      if (legacy) {
-        const beans = JSON.parse(legacy).map(migrateLegacyBean);
-        localStorage.setItem(STORAGE_KEY, JSON.stringify(beans));
-        return beans;
-      }
-    }
-  } catch(e) { console.error("Load error:", e); }
-  return seedBeans;
-}
-function saveBeans(b) { try { localStorage.setItem(STORAGE_KEY, JSON.stringify(b)); } catch {} }
-
-function daysAgo(dateStr) {
-  if (!dateStr) return null;
-  const d = new Date(dateStr);
-  if (isNaN(d)) return null;
-  const days = Math.floor((Date.now() - d.getTime()) / 86400000);
-  if (days === 0) return "Today";
-  if (days === 1) return "1 day ago";
-  return days + " days ago";
-}
-
-// ── FIELD / TOGGLE / SELECT ──
-function Field({ label, value, onChange, multiline, placeholder }) {
-  return multiline
-    ? <div className="field"><label>{label}</label><textarea value={value} onChange={e => onChange(e.target.value)} rows={2} placeholder={placeholder || ""} /></div>
-    : <div className="field"><label>{label}</label><input value={value} onChange={e => onChange(e.target.value)} placeholder={placeholder || ""} /></div>;
-}
-function Toggle({ label, value, onChange }) {
-  return (
-    <div className="field"><label>{label}</label>
-      <button className={"toggle-btn" + (value ? " on" : "")} onClick={() => onChange(!value)}>{value ? "Yes" : "No"}</button>
-    </div>
-  );
-}
-function Select({ label, value, onChange, options }) {
-  return (
-    <div className="field"><label>{label}</label>
-      <select value={value} onChange={e => onChange(e.target.value)} className="sel-input">
-        {options.map(o => <option key={o.value || o} value={o.value || o}>{o.label || o}</option>)}
-      </select>
-    </div>
-  );
-}
-
-// ── SHOT PARAM with DROPDOWN ──
+// ── SHOT PARAM WITH DROPDOWN ──
 function ShotParam({ label, value, unit, onSave, wide, small, options }) {
   const [open, setOpen] = useState(false);
   const [custom, setCustom] = useState(false);
   const [draft, setDraft] = useState(value);
   const inputRef = useRef(null);
-
   useEffect(() => { setDraft(value); }, [value]);
-
-  const commit = (v) => { onSave(v || draft); setOpen(false); setCustom(false); };
-
+  const commit = (v) => { onSave(v !== undefined ? v : draft); setOpen(false); setCustom(false); };
   return (
     <div className={"pm" + (wide ? " w" : "")} style={{ cursor: "pointer", position: "relative" }} onClick={() => !open && setOpen(true)}>
       <div className="pm-lbl">{label}</div>
@@ -221,20 +156,16 @@ function ShotParam({ label, value, unit, onSave, wide, small, options }) {
           {options && !custom && (
             <div className="param-opts">
               {options.map(o => (
-                <button key={o.value || o} className={"param-opt" + ((o.value || o) === value ? " sel" : "")}
-                  onClick={() => commit(o.value || o)}>
+                <button key={o.value || o} className={"param-opt" + ((o.value || o) === value ? " sel" : "")} onClick={() => commit(o.value || o)}>
                   {o.label || o}
                 </button>
               ))}
-              <button className="param-opt custom-opt" onClick={() => { setCustom(true); setTimeout(() => inputRef.current && inputRef.current.focus(), 50); }}>
-                Custom...
-              </button>
+              <button className="param-opt custom-opt" onClick={() => { setCustom(true); setTimeout(() => inputRef.current && inputRef.current.focus(), 50); }}>Custom...</button>
             </div>
           )}
           {(!options || custom) && (
             <div className="param-custom">
-              <input ref={inputRef} className="param-custom-input" value={draft}
-                onChange={e => setDraft(e.target.value)}
+              <input ref={inputRef} className="param-custom-input" value={draft} onChange={e => setDraft(e.target.value)}
                 onKeyDown={e => { if (e.key === "Enter") commit(); if (e.key === "Escape") { setOpen(false); setCustom(false); } }}
                 placeholder={unit ? "Enter " + unit : "Enter value"} />
               <button className="btn p sm" onClick={() => commit()} style={{ marginTop: 6 }}>Set</button>
@@ -314,72 +245,52 @@ function Timer({ stages, onClose }) {
 }
 
 // ── ESPRESSO COMPASS ──
-function EspressoCompass({ onSelect }) {
-  const [selected, setSelected] = useState(null);
-  // Compass quadrants based on Barista Hustle compass
-  // X axis: Under-extracted (sour/salty) → Over-extracted (bitter/dry)
-  // Y axis: Under-strength (weak/watery) → Over-strength (heavy/intense)
+function EspressoCompass({ onSelect, selected }) {
   const zones = [
-    { id: "sour_weak", x: 20, y: 20, label: "Sour & Thin", desc: "Sour, acidic, watery", color: "#e8a060", fix: "Grind finer, increase dose, or extend time" },
-    { id: "sour_strong", x: 20, y: 75, label: "Sour & Heavy", desc: "Sour, dense, sharp", color: "#d4804a", fix: "Grind finer or extend time. Consider lower dose." },
-    { id: "balanced_light", x: 50, y: 20, label: "Balanced & Light", desc: "Clean, bright, delicate", color: "#90b878", fix: "Increase dose slightly for more body" },
-    { id: "balanced", x: 50, y: 50, label: "Balanced ✓", desc: "Sweet, complex, balanced body", color: "#d4aa7a", fix: "You're in the zone — refine to taste" },
-    { id: "balanced_heavy", x: 50, y: 75, label: "Balanced & Full", desc: "Rich, sweet, heavy body", color: "#a89060", fix: "Slightly coarser grind or shorter time" },
-    { id: "bitter_weak", x: 80, y: 20, label: "Bitter & Thin", desc: "Bitter, dry, watery finish", color: "#9a9070", fix: "Grind coarser and increase dose" },
-    { id: "bitter_strong", x: 80, y: 75, label: "Bitter & Heavy", desc: "Harsh, bitter, intense, astringent", color: "#887050", fix: "Grind coarser, reduce dose, or shorten time" },
+    { id: "sour_weak", x: 18, y: 20, label: "Sour & Thin", desc: "Sour, acidic, watery", color: "#e8a060", fix: "Improve puck prep first. Try coarser grind if shot was slow. Finer only if shot was fast." },
+    { id: "sour_strong", x: 18, y: 72, label: "Sour & Heavy", desc: "Sour, dense, sharp", color: "#d4804a", fix: "Check for channeling. Slightly finer grind if shot was fast, better distribution if slow." },
+    { id: "balanced_light", x: 50, y: 20, label: "Balanced & Light", desc: "Clean, bright, delicate", color: "#a8c890", fix: "Increase dose by 0.5g for more body, or extend yield slightly." },
+    { id: "balanced", x: 50, y: 50, label: "Balanced ✓", desc: "Sweet, complex, balanced", color: "#d4aa7a", fix: "You're dialed in. Note these settings." },
+    { id: "balanced_heavy", x: 50, y: 78, label: "Rich & Full", desc: "Rich, sweet, heavy body", color: "#a89060", fix: "Slightly coarser grind or shorter extraction time." },
+    { id: "bitter_weak", x: 82, y: 20, label: "Bitter & Thin", desc: "Bitter, dry, watery", color: "#9a9070", fix: "Grind coarser and increase dose. Check brew temp — may be too high." },
+    { id: "bitter_strong", x: 82, y: 72, label: "Bitter & Heavy", desc: "Harsh, bitter, astringent", color: "#887050", fix: "Grind coarser, reduce dose, shorten time, or lower temp by 1-2°F." },
   ];
-
   return (
     <div className="compass-wrap">
       <div className="compass-title">Espresso Compass</div>
-      <div className="compass-subtitle">Tap where your shot is landing</div>
-      <div className="compass-grid">
-        <div className="compass-axis-x-labels">
-          <span>Under-extracted</span>
-          <span>Balanced</span>
-          <span>Over-extracted</span>
-        </div>
-        <div className="compass-axis-y-label-left">Strong</div>
-        <div className="compass-svg-wrap">
-          <svg viewBox="0 0 100 100" className="compass-svg">
-            {/* Grid lines */}
-            <line x1="33" y1="0" x2="33" y2="100" stroke="#3a2e22" strokeWidth="0.5" />
-            <line x1="66" y1="0" x2="66" y2="100" stroke="#3a2e22" strokeWidth="0.5" />
-            <line x1="0" y1="33" x2="100" y2="33" stroke="#3a2e22" strokeWidth="0.5" />
-            <line x1="0" y1="66" x2="100" y2="66" stroke="#3a2e22" strokeWidth="0.5" />
-            {/* Center crosshair */}
-            <line x1="50" y1="44" x2="50" y2="56" stroke="#d4aa7a" strokeWidth="0.8" opacity="0.4" />
-            <line x1="44" y1="50" x2="56" y2="50" stroke="#d4aa7a" strokeWidth="0.8" opacity="0.4" />
-            {zones.map(z => (
-              <g key={z.id} onClick={() => { setSelected(z.id); onSelect && onSelect(z); }}>
-                <circle cx={z.x} cy={z.y} r={selected === z.id ? 7 : 5.5}
-                  fill={z.color} opacity={selected === z.id ? 1 : 0.65}
-                  stroke={selected === z.id ? "#fff" : "none"} strokeWidth="1.5"
-                  style={{ cursor: "pointer", transition: "all 0.2s" }} />
-                <text x={z.x} y={z.y + 11} textAnchor="middle" fontSize="4" fill="#c8b898" style={{ pointerEvents: "none" }}>
-                  {z.label.split(" & ")[0]}
-                </text>
-              </g>
-            ))}
-          </svg>
-          <div className="compass-axis-y-label-right">Weak</div>
-        </div>
-        <div className="compass-axis-x-labels" style={{ marginTop: 4 }}>
-          <span>Sour/Salty</span>
-          <span>Sweet</span>
-          <span>Bitter/Dry</span>
-        </div>
+      <div className="compass-subtitle">Tap where your shot lands</div>
+      <div className="compass-axis-x-labels"><span>Under-extracted</span><span>Balanced</span><span>Over-extracted</span></div>
+      <div className="compass-svg-wrap">
+        <div className="compass-y-label top">Strong</div>
+        <svg viewBox="0 0 100 100" className="compass-svg">
+          <line x1="33" y1="0" x2="33" y2="100" stroke="#3a2e22" strokeWidth="0.5"/>
+          <line x1="66" y1="0" x2="66" y2="100" stroke="#3a2e22" strokeWidth="0.5"/>
+          <line x1="0" y1="33" x2="100" y2="33" stroke="#3a2e22" strokeWidth="0.5"/>
+          <line x1="0" y1="66" x2="100" y2="66" stroke="#3a2e22" strokeWidth="0.5"/>
+          <line x1="50" y1="43" x2="50" y2="57" stroke="#d4aa7a" strokeWidth="0.8" opacity="0.3"/>
+          <line x1="43" y1="50" x2="57" y2="50" stroke="#d4aa7a" strokeWidth="0.8" opacity="0.3"/>
+          {zones.map(z => (
+            <g key={z.id} onClick={() => onSelect(selected?.id === z.id ? null : z)}>
+              <circle cx={z.x} cy={z.y} r={selected?.id === z.id ? 7.5 : 5.5}
+                fill={z.color} opacity={selected?.id === z.id ? 1 : 0.6}
+                stroke={selected?.id === z.id ? "#fff" : "none"} strokeWidth="1.5"
+                style={{ cursor: "pointer", transition: "all 0.2s" }} />
+              <text x={z.x} y={z.y + 10} textAnchor="middle" fontSize="3.5" fill="#c8b898" style={{ pointerEvents: "none" }}>
+                {z.label.split(" & ")[0]}
+              </text>
+            </g>
+          ))}
+        </svg>
+        <div className="compass-y-label bottom">Weak</div>
       </div>
-      {selected && (() => {
-        const z = zones.find(z => z.id === selected);
-        return (
-          <div className="compass-result">
-            <div className="compass-result-label" style={{ color: z.color }}>{z.label}</div>
-            <div className="compass-result-desc">{z.desc}</div>
-            <div className="compass-result-fix"><span style={{ color: "var(--gold)" }}>Fix: </span>{z.fix}</div>
-          </div>
-        );
-      })()}
+      <div className="compass-axis-x-labels" style={{marginTop:4}}><span>Sour/Salty</span><span>Sweet</span><span>Bitter/Dry</span></div>
+      {selected && (
+        <div className="compass-result">
+          <div className="compass-result-label" style={{ color: selected.color }}>{selected.label}</div>
+          <div className="compass-result-desc">{selected.desc}</div>
+          <div className="compass-result-fix"><span style={{ color: "var(--gold)" }}>Suggestion: </span>{selected.fix}</div>
+        </div>
+      )}
     </div>
   );
 }
@@ -387,12 +298,12 @@ function EspressoCompass({ onSelect }) {
 // ── AI ──
 async function callClaude(system, user, json) {
   const apiKey = window._COFFEE_API_KEY;
-  if (!apiKey) return json ? null : "⚠️ No API key set. Tap the ⚙ gear button in the top right to add your Anthropic API key.";
+  if (!apiKey) return json ? null : "⚠️ No API key. Tap ⚙ to add your Anthropic API key.";
   try {
     const res = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
       headers: { "Content-Type": "application/json", "x-api-key": apiKey, "anthropic-version": "2023-06-01", "anthropic-dangerous-direct-browser-access": "true" },
-      body: JSON.stringify({ model: "claude-sonnet-4-20250514", max_tokens: 1000, system, messages: [{ role: "user", content: user }] }),
+      body: JSON.stringify({ model: "claude-sonnet-4-20250514", max_tokens: 1200, system, messages: [{ role: "user", content: user }] }),
     });
     if (!res.ok) { const t = await res.text(); return json ? null : "API error " + res.status + ": " + t.slice(0, 200); }
     const d = await res.json();
@@ -403,22 +314,22 @@ async function callClaude(system, user, json) {
   } catch (e) {
     const msg = e.message || String(e);
     if (msg.includes("NetworkError") || msg.includes("Failed to fetch") || msg.includes("Load failed")) {
-      return json ? null : "⚠️ Network blocked. Try opening the app in Safari browser (not from home screen icon). Settings > Safari > Advanced > Experimental Features may help.";
+      return json ? null : "⚠️ Network blocked. Open in Safari browser instead of home screen, or check Settings > Safari > Advanced > Experimental Features.";
     }
     return json ? null : "Error: " + msg;
   }
 }
 
-const SYSTEM = `You are an expert specialty coffee consultant. Equipment: La Marzocco Linea Micra, Mahlkonig E64S (calibrated — 0-1 range for espresso, full 0-12 for manual methods, 5 dots between numbers), Hario V60 with metal filter, standard AeroPress (max 220g water capacity), temperature-controlled kettle, RO water with Third Wave espresso minerals. IMPORTANT: All AeroPress recipes must use 220g water maximum.
+const SYSTEM = `You are an expert specialty coffee consultant. Equipment: La Marzocco Linea Micra, Mahlkonig E64S (calibrated — 0-1 range for espresso, full 0-12 for manual methods, 5 dots between numbers), Hario V60 with metal filter, standard AeroPress (max 220g water), temperature-controlled kettle, RO water with Third Wave espresso minerals.
 
-CRITICAL DIAGNOSIS RULES — always follow these:
-- If shot time is SLOW (>35s): never recommend going finer. Recommend coarser grind or better puck prep.
-- If shot time is FAST (<22s): never recommend going coarser first. Recommend finer grind.
-- If sour + slow: this almost always indicates CHANNELING, not simple under-extraction. Recommend puck prep improvements first, not finer grind.
-- If bitter + fast: indicates over-extraction. Recommend coarser grind, lower temp, or shorter yield.
-- Never contradict the shot time. Always reason from the actual numbers given.
-- Sour does NOT always mean under-extracted — consider the full picture including shot time and body.
-- Give specific, actionable advice. 3-5 bullet points max. No fluff. Always reference the actual grind setting and shot time in your advice.`;
+CRITICAL DIAGNOSIS RULES:
+- If shot ran SLOW (>35s): NEVER recommend going finer. Recommend coarser grind, better puck prep, or distribution.
+- If shot ran FAST (<22s): NEVER recommend going coarser. Recommend finer grind.
+- Sour + slow = almost always CHANNELING, not under-extraction. Puck prep first.
+- Bitter + fast = over-extraction. Coarser grind, lower temp, shorter yield.
+- Never contradict the shot time. Always reason from actual numbers.
+- AeroPress max 220g water total.
+- Give specific, actionable advice. 3-5 bullets max. No fluff.`;
 
 // ── BEAN INFO SHEET ──
 function BeanInfoSheet({ bean }) {
@@ -426,13 +337,14 @@ function BeanInfoSheet({ bean }) {
   const [loading, setLoading] = useState(false);
   const generate = async () => {
     setLoading(true);
-    const result = await callClaude("Return only valid JSON, no markdown.", `Generate coffee info sheet as JSON for: ${bean.name} by ${bean.roaster}. Origin: ${bean.origin}. Process: ${bean.process}. Roast: ${bean.roast}. Altitude: ${bean.altitude||"unknown"}. Varietal: ${bean.varietal||"unknown"}. Flavor: ${bean.flavorProfile||"unknown"}.
+    const result = await callClaude("Return only valid JSON, no markdown.",
+      `Coffee info sheet as JSON for: ${bean.name} by ${bean.roaster}. Origin: ${bean.origin}. Process: ${bean.process}. Roast: ${bean.roast}. Altitude: ${bean.altitude||"unknown"}. Varietal: ${bean.varietal||"unknown"}. Flavor: ${bean.flavorProfile||"unknown"}.
 Keys: {"originStory":"2-3 sentences","processExplained":"2-3 sentences","roastProfile":"2 sentences","flavorNotes":["note1","note2","note3","note4"],"brewingTips":"2-3 sentences","pairings":["p1","p2","p3"]}`, true);
     setInfo(result); setLoading(false);
   };
   return (
     <div>
-      {!info && !loading && <><div className="sec-txt" style={{ marginBottom: 12, fontSize: 12 }}>Full profile for {bean.name} — origin, process, flavor notes, tips.</div><button className="btn ai" onClick={generate}>Generate Info Sheet</button></>}
+      {!info && !loading && <><div className="sec-txt" style={{marginBottom:12,fontSize:12}}>AI-generated profile for {bean.name}.</div><button className="btn ai" onClick={generate}>Generate Info Sheet</button></>}
       {loading && <div className="ai-loading"><div className="ai-dot"/><div className="ai-dot"/><div className="ai-dot"/></div>}
       {info && (
         <div>
@@ -442,11 +354,24 @@ Keys: {"originStory":"2-3 sentences","processExplained":"2-3 sentences","roastPr
           {info.flavorNotes && <div className="info-section"><div className="info-lbl">Flavor Notes</div><div className="flavor-pills">{info.flavorNotes.map((n,i) => <span key={i} className="flavor-pill">{n}</span>)}</div></div>}
           {info.brewingTips && <div className="info-section"><div className="info-lbl">Brewing Tips</div><div className="info-txt">{info.brewingTips}</div></div>}
           {info.pairings && <div className="info-section"><div className="info-lbl">Pairs With</div><div className="flavor-pills">{info.pairings.map((p,i) => <span key={i} className="flavor-pill" style={{borderColor:"var(--blue)",color:"var(--blue)"}}>{p}</span>)}</div></div>}
-          <button className="btn sm" style={{ marginTop: 12 }} onClick={() => setInfo(null)}>Regenerate</button>
+          <button className="btn sm" style={{marginTop:12}} onClick={() => setInfo(null)}>Regenerate</button>
         </div>
       )}
     </div>
   );
+}
+
+// ── FIELD / TOGGLE / SELECT ──
+function Field({ label, value, onChange, multiline, placeholder }) {
+  return multiline
+    ? <div className="field"><label>{label}</label><textarea value={value} onChange={e => onChange(e.target.value)} rows={2} placeholder={placeholder||""}/></div>
+    : <div className="field"><label>{label}</label><input value={value} onChange={e => onChange(e.target.value)} placeholder={placeholder||""}/></div>;
+}
+function Toggle({ label, value, onChange }) {
+  return <div className="field"><label>{label}</label><button className={"toggle-btn"+(value?" on":"")} onClick={() => onChange(!value)}>{value?"Yes":"No"}</button></div>;
+}
+function Select({ label, value, onChange, options }) {
+  return <div className="field"><label>{label}</label><select value={value} onChange={e => onChange(e.target.value)} className="sel-input">{options.map(o => <option key={o.value||o} value={o.value||o}>{o.label||o}</option>)}</select></div>;
 }
 
 // ── MAIN APP ──
@@ -463,20 +388,22 @@ function App() {
   const [grindDraft, setGrindDraft] = useState({ position: { whole: 0, dot: 0 }, note: "", date: "" });
   const [copied, setCopied] = useState(false);
   const [aiLoading, setAiLoading] = useState(false);
-  const [aiResults, setAiResults] = useState({ recipe_aeropress: "", recipe_pourover: "", diagnose_espresso: "", diagnose_aeropress: "", diagnose_pourover: "" });
+  const [aiResults, setAiResults] = useState({});
   const [diagInput, setDiagInput] = useState("");
+  const [shotTime, setShotTime] = useState("");
+  const [shotYield, setShotYield] = useState("");
   const [recipeCtx, setRecipeCtx] = useState("");
+  const [recipeFeedback, setRecipeFeedback] = useState("");
   const [showApiModal, setShowApiModal] = useState(false);
   const [apiKeyInput, setApiKeyInput] = useState("");
-  const [isMobile, setIsMobile] = useState(false);
+  const [isMobile, setIsMobile] = useState(true);
   const [showTimer, setShowTimer] = useState(false);
   const [timerStages, setTimerStages] = useState([]);
   const [urlInput, setUrlInput] = useState("");
   const [urlLoading, setUrlLoading] = useState(false);
   const [urlImport, setUrlImport] = useState(null);
   const [compassSelected, setCompassSelected] = useState(null);
-  const [shotTime, setShotTime] = useState("");
-  const [shotYield, setShotYield] = useState("");
+  const [activeRecipeIdx, setActiveRecipeIdx] = useState(null);
 
   useEffect(() => {
     const check = () => setIsMobile(window.innerWidth < 680);
@@ -490,35 +417,34 @@ function App() {
   const latestGrind = current?.grindLogs?.[activeMethod]?.slice(-1)[0] || null;
   const md = current?.methods?.[activeMethod] || {};
 
-  const aiResultKey = (tab) => tab === "recipe" ? "recipe_" + activeMethod : "diagnose_" + activeMethod;
-  const aiResult = aiResults[aiResultKey(activeTab)] || "";
-  const setAiResult = (val) => setAiResults(prev => ({ ...prev, [aiResultKey(activeTab)]: val }));
+  const aiKey = activeTab + "_" + activeMethod + "_" + selectedId;
+  const aiResult = aiResults[aiKey] || "";
+  const setAiResult = (val) => setAiResults(prev => ({ ...prev, [aiKey]: val }));
 
   const upd = fn => setBeans(prev => { const next = fn(prev); saveBeans(next); return next; });
+
   const selectBean = id => {
-    setSelectedId(id);
-    setShowList(false);
-    setEditing(false);
-    setAdding(false);
-    setActiveTab("shot");
-    setAiResults({ recipe_aeropress: "", recipe_pourover: "", diagnose_espresso: "", diagnose_aeropress: "", diagnose_pourover: "" });
-    setDiagInput("");
-    setUrlImport(null);
-    setCompassSelected(null);
-    setShotTime("");
-    setShotYield("");
-    // Scroll detail to top
+    setSelectedId(id); setShowList(false); setEditing(false); setAdding(false);
+    setActiveTab("shot"); setDiagInput(""); setUrlImport(null);
+    setCompassSelected(null); setShotTime(""); setShotYield("");
+    setActiveRecipeIdx(null); setRecipeFeedback("");
     setTimeout(() => { const d = document.querySelector(".detail"); if (d) d.scrollTop = 0; }, 50);
   };
-  const startAdd = () => { setBeanDraft({ roaster: "", name: "", origin: "", process: "", roast: "", altitude: "", varietal: "", flavorProfile: "", roastDate: "", imageUrl: "", rating: 0 }); setAdding(true); setEditing(false); setShowList(false); setUrlImport(null); setUrlInput(""); };
+
+  const startAdd = () => {
+    setBeanDraft({ roaster: "", name: "", origin: "", process: "", roast: "", altitude: "", varietal: "", flavorProfile: "", roastDate: "", imageUrl: "", imageBase64: "", rating: 0, inStock: true, currentlyBrewing: false });
+    setAdding(true); setEditing(false); setShowList(false); setUrlImport(null); setUrlInput("");
+  };
+
   const saveNew = () => {
     if (!beanDraft.name) return;
     const id = Date.now();
-    upd(bs => [...bs, { ...beanDraft, id, methods: { espresso: { ...defaultParams.espresso }, aeropress: { ...defaultParams.aeropress }, pourover: { ...defaultParams.pourover } }, grindLogs: { espresso: [], aeropress: [], pourover: [] } }]);
+    upd(bs => [...bs, { ...beanDraft, id, methods: { espresso: {...defaultParams.espresso}, aeropress: {...defaultParams.aeropress}, pourover: {...defaultParams.pourover} }, grindLogs: { espresso: [], aeropress: [], pourover: [] }, savedRecipes: { aeropress: [], pourover: [] } }]);
     setSelectedId(id); setAdding(false); setShowList(false); setActiveTab("shot");
   };
+
   const deleteBean = id => { upd(bs => bs.filter(b => b.id !== id)); setSelectedId(null); setShowList(true); };
-  const startEdit = () => { setBeanDraft({ roaster: current.roaster, name: current.name, origin: current.origin, process: current.process, roast: current.roast, altitude: current.altitude || "", varietal: current.varietal || "", flavorProfile: current.flavorProfile || "", roastDate: current.roastDate || "", imageUrl: current.imageUrl || "", rating: current.rating || 0, methods: JSON.parse(JSON.stringify(current.methods)) }); setEditing(true); setActiveTab("shot"); };
+  const startEdit = () => { setBeanDraft({ ...current, methods: JSON.parse(JSON.stringify(current.methods)) }); setEditing(true); setActiveTab("shot"); };
   const saveEdit = () => { upd(bs => bs.map(b => b.id === selectedId ? { ...b, ...beanDraft } : b)); setEditing(false); };
   const updateDraftMethod = (field, val) => setBeanDraft(d => ({ ...d, methods: { ...d.methods, [activeMethod]: { ...d.methods[activeMethod], [field]: val } } }));
   const updateMethodField = (field, val) => {
@@ -530,17 +456,83 @@ function App() {
 
   const saveGrind = () => {
     const entry = { ...grindDraft, id: Date.now(), date: grindDraft.date || new Date().toLocaleDateString() };
-    upd(bs => bs.map(b => b.id === selectedId ? { ...b, grindLogs: { ...b.grindLogs, [activeMethod]: [...(b.grindLogs[activeMethod] || []), entry] } } : b));
+    upd(bs => bs.map(b => b.id === selectedId ? { ...b, grindLogs: { ...b.grindLogs, [activeMethod]: [...(b.grindLogs[activeMethod]||[]), entry] } } : b));
     setAddingGrind(false); setGrindDraft({ position: { whole: 0, dot: 0 }, note: "", date: "" });
   };
   const deleteGrind = gid => upd(bs => bs.map(b => b.id === selectedId ? { ...b, grindLogs: { ...b.grindLogs, [activeMethod]: b.grindLogs[activeMethod].filter(g => g.id !== gid) } } : b));
 
+  // Save AI recipe and apply to shot page
+  const saveRecipe = (recipeText) => {
+    const recipe = { id: Date.now(), date: new Date().toLocaleDateString(), text: recipeText, feedback: "" };
+    upd(bs => bs.map(b => b.id === selectedId ? { ...b, savedRecipes: { ...b.savedRecipes, [activeMethod]: [...(b.savedRecipes?.[activeMethod]||[]), recipe] } } : b));
+  };
+
+  const applyRecipeToShot = (recipeText) => {
+    // Parse recipe text and populate shot params
+    const lines = recipeText.toLowerCase();
+    const parseNum = (patterns) => {
+      for (const p of patterns) {
+        const m = recipeText.match(p);
+        if (m) return m[1];
+      }
+      return null;
+    };
+    if (activeMethod === "aeropress") {
+      const dose = parseNum([/dose[:\s]+(\d+(?:\.\d+)?)\s*g/i, /(\d+(?:\.\d+)?)\s*g\s*(?:of\s*)?(?:coffee|dose)/i]);
+      const water = parseNum([/water[:\s]+(\d+(?:\.\d+)?)\s*g/i, /(\d+)\s*g\s*water/i, /(\d+)\s*ml/i]);
+      const temp = parseNum([/(\d+(?:\.\d+)?)\s*°?F/i]);
+      const steep = parseNum([/steep[:\s]+(\d+)\s*s/i, /(\d+)\s*s(?:ec(?:ond)?s?)?\s*steep/i]);
+      const press = parseNum([/press[:\s]+(\d+)\s*s/i, /(\d+)\s*s(?:ec(?:ond)?s?)?\s*press/i]);
+      const bloom = parseNum([/bloom[:\s]+(\d+)\s*s/i, /(\d+)\s*s(?:ec(?:ond)?s?)?\s*bloom/i]);
+      const grindMatch = recipeText.match(/grind[:\s]+(\d+(?:[·.]\d*)?)/i);
+      if (dose) updateMethodField("dose", dose);
+      if (water) updateMethodField("water", Math.min(220, parseInt(water)).toString());
+      if (temp) updateMethodField("temp", temp);
+      if (steep) updateMethodField("steepTime", steep);
+      if (press) updateMethodField("pressTime", press);
+      if (bloom) { updateMethodField("bloom", true); updateMethodField("bloomTime", bloom); }
+    } else if (activeMethod === "pourover") {
+      const dose = parseNum([/dose[:\s]+(\d+(?:\.\d+)?)\s*g/i, /(\d+(?:\.\d+)?)\s*g\s*(?:of\s*)?(?:coffee|dose)/i]);
+      const water = parseNum([/water[:\s]+(\d+(?:\.\d+)?)\s*g/i, /(\d+)\s*g\s*water/i]);
+      const temp = parseNum([/(\d+(?:\.\d+)?)\s*°?F/i]);
+      const bloom = parseNum([/bloom[:\s]+(\d+)\s*g/i, /(\d+)\s*g\s*bloom/i]);
+      const bloomTime = parseNum([/bloom.*?(\d+)\s*s/i]);
+      const totalTime = recipeText.match(/total[:\s]+(\d+:\d+|\d+\s*(?:min|minutes))/i)?.[1];
+      if (dose) updateMethodField("dose", dose);
+      if (water) updateMethodField("water", water);
+      if (temp) updateMethodField("temp", temp);
+      if (bloom) updateMethodField("bloomAmount", bloom);
+      if (bloomTime) updateMethodField("bloomTime", bloomTime);
+      if (totalTime) updateMethodField("totalTime", totalTime);
+      // Store full recipe as pours for timer
+      updateMethodField("pours", recipeText);
+    }
+  };
+
+  const deleteRecipe = (method, id) => {
+    upd(bs => bs.map(b => b.id === selectedId ? { ...b, savedRecipes: { ...b.savedRecipes, [method]: b.savedRecipes[method].filter(r => r.id !== id) } } : b));
+    if (activeRecipeIdx !== null) setActiveRecipeIdx(null);
+  };
+
+  // Photo upload
+  const handlePhotoUpload = (e, isDraft) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      const base64 = ev.target.result;
+      if (isDraft) setBeanDraft(d => ({ ...d, imageBase64: base64, imageUrl: "" }));
+      else updateBeanField("imageBase64", base64);
+    };
+    reader.readAsDataURL(file);
+  };
+
+  // AI calls
   const importFromUrl = async () => {
     if (!urlInput.trim()) return;
     setUrlLoading(true); setUrlImport(null);
     const result = await callClaude("Extract coffee bean info from URL. Return ONLY valid JSON, no markdown.",
-      `URL: ${urlInput}\n\nReturn JSON: {"roaster":"","name":"","origin":"","process":"","roast":"","altitude":"","varietal":"","flavorProfile":"","imageUrl":""}`,
-      true);
+      `URL: ${urlInput}\nReturn JSON: {"roaster":"","name":"","origin":"","process":"","roast":"","altitude":"","varietal":"","flavorProfile":"","imageUrl":""}`, true);
     if (result) { setUrlImport(result); setBeanDraft(d => ({ ...d, ...result })); }
     else setUrlImport({ error: "Couldn't parse URL. Fill in manually." });
     setUrlLoading(false);
@@ -549,43 +541,52 @@ function App() {
   const runDiagnosis = async () => {
     if (!diagInput.trim() && !compassSelected) return;
     setAiLoading(true); setAiResult("");
-    const compassCtx = compassSelected ? `\nEspresso compass selection: ${compassSelected.label} — ${compassSelected.desc}` : "";
-    const timeStr = shotTime ? shotTime + "s" : md.time + "s (logged)";
-    const yieldStr = shotYield ? shotYield + "g" : md.yield + "g (logged)";
+    const timeStr = shotTime ? shotTime + "s" : (md.time ? md.time + "s (logged)" : "unknown");
+    const yieldStr = shotYield ? shotYield + "g" : (md.yield ? md.yield + "g (logged)" : "unknown");
+    const slowFlag = shotTime && parseInt(shotTime) > 35 ? " SHOT WAS SLOW — do NOT recommend finer grind." : "";
+    const fastFlag = shotTime && parseInt(shotTime) < 22 ? " SHOT WAS FAST — do NOT recommend coarser grind." : "";
+    const compassCtx = compassSelected ? ` Compass: ${compassSelected.label} — ${compassSelected.desc}.` : "";
     const ctx = activeMethod === "espresso"
-      ? `Bean: ${current.name} (${current.roaster}), ${current.origin}, ${current.process}, ${current.roast}. Espresso setup: ${md.dose}g dose / ${md.temp}°F / grind ${grindLabel(latestGrind?.position)} / pre-brew ${md.preBrew}. THIS SHOT: time=${timeStr}, yield=${yieldStr}. ${shotTime && parseInt(shotTime) > 35 ? "NOTE: Shot ran SLOW — do not recommend going finer." : shotTime && parseInt(shotTime) < 22 ? "NOTE: Shot ran FAST — do not recommend going coarser." : ""}${compassCtx}`
+      ? `Bean: ${current.name} (${current.roaster}), ${current.origin}, ${current.process}, ${current.roast}. Setup: ${md.dose}g dose / ${md.temp}°F / grind ${grindLabel(latestGrind?.position)} / pre-brew ${md.preBrew}. THIS SHOT: time=${timeStr}, yield=${yieldStr}.${slowFlag}${fastFlag}${compassCtx}`
       : activeMethod === "aeropress"
       ? `Bean: ${current.name}, ${current.process}, ${current.roast}. AeroPress: ${md.dose}g / ${md.water}g / ${md.temp}°F / steep ${md.steepTime}s / press ${md.pressTime}s. Inverted: ${md.inverted}. Bloom: ${md.bloom} ${md.bloomTime}s. Grind: ${grindLabel(latestGrind?.position)}.`
       : `Bean: ${current.name}, ${current.process}, ${current.roast}. Pour Over V60 metal filter: ${md.dose}g / ${md.water}g / ${md.temp}°F / bloom ${md.bloomAmount}g ${md.bloomTime}s / total ${md.totalTime}. Grind: ${grindLabel(latestGrind?.position)}.`;
-    const userMsg = diagInput.trim() ? `Setup: ${ctx}\n\nWhat I'm tasting/experiencing: ${diagInput}\n\nSpecific adjustments?` : `Setup: ${ctx}\n\nBased on my espresso compass selection (${compassSelected?.label}), what specific adjustments should I make?`;
+    const userMsg = diagInput.trim()
+      ? `Setup: ${ctx}\n\nTasting/experiencing: ${diagInput}\n\nSpecific adjustments?`
+      : `Setup: ${ctx}\n\nCompass selection: ${compassSelected?.label}. What adjustments?`;
     const result = await callClaude(SYSTEM, userMsg);
     setAiResult(result); setAiLoading(false);
   };
 
-  const generateRecipe = async () => {
+  const generateRecipe = async (feedback) => {
     setAiLoading(true); setAiResult("");
     const beanInfo = `${current.name} by ${current.roaster}. Origin: ${current.origin}. Process: ${current.process}. Roast: ${current.roast}.`;
+    const savedList = current.savedRecipes?.[activeMethod];
+    const prevRecipe = activeRecipeIdx !== null && savedList ? savedList[activeRecipeIdx]?.text : null;
     const inst = activeMethod === "aeropress"
-      ? "Generate AeroPress recipe. Max 220g water total. Include: dose (g), water (g ≤220), temp (°F), inverted or standard, bloom (y/n + time counted in total water), steep time, press time, grind on 0-12 scale. Brief rationale."
-      : "Generate pour over for Hario V60 with METAL filter (grind coarser than paper). Include: dose (g), water (g), temp (°F), bloom amount+time, pour sequence with timing, total time, grind on 0-12 scale. Brief rationale.";
-    const result = await callClaude(SYSTEM, `Bean: ${beanInfo}${recipeCtx ? `\nContext: ${recipeCtx}` : ""}\n\n${inst}`);
+      ? `Generate AeroPress recipe. Max 220g water. Include: dose (g), water (g ≤220), temp (°F), inverted or standard, bloom time (s), steep time (s), press time (s), grind on 0-12 scale with dots. Brief rationale.`
+      : `Generate pour over for Hario V60 with METAL filter (grind coarser than paper). Include: dose (g), water (g), temp (°F), bloom amount (g) and time (s), pour sequence with timing and amounts, total time, grind on 0-12 scale. Brief rationale.`;
+    const feedbackSection = feedback ? `\n\nUser feedback on previous recipe: ${feedback}\nPlease adjust the recipe based on this feedback.` : "";
+    const prevSection = prevRecipe ? `\n\nPrevious recipe for reference:\n${prevRecipe}` : "";
+    const result = await callClaude(SYSTEM, `Bean: ${beanInfo}${recipeCtx ? `\nContext: ${recipeCtx}` : ""}${prevSection}${feedbackSection}\n\n${inst}`);
     setAiResult(result); setAiLoading(false);
   };
 
   const launchTimer = (method) => {
     const stages = [];
     if (method === "aeropress") {
-      if (md.bloom && md.bloomTime) stages.push({ name: "Bloom", duration: md.bloomTime, action: `Add ${md.dose}g coffee, pour ${Math.round(parseInt(md.dose) * 2)}g water, stir` });
+      if (md.bloom && md.bloomTime) stages.push({ name: "Bloom", duration: md.bloomTime, action: `Pour ${Math.round(parseInt(md.dose||15) * 2)}g water, stir gently` });
       if (md.steepTime) stages.push({ name: "Steep", duration: md.steepTime, action: "Wait — let it brew" });
       if (md.pressTime) stages.push({ name: "Press", duration: md.pressTime, action: "Press slowly and steadily" });
     } else {
       if (md.bloomAmount && md.bloomTime) stages.push({ name: "Bloom", duration: md.bloomTime, action: `Pour ${md.bloomAmount}g, saturate all grounds` });
       if (md.pours) {
-        const lines = md.pours.split("\n").filter(l => l.trim());
-        lines.forEach((l, i) => { const m = l.match(/(\d+)\s*s/i); stages.push({ name: `Pour ${i + 1}`, duration: m ? m[1] : "35", action: l.trim() }); });
-      } else {
-        const pp = Math.round((parseInt(md.water || 300) - parseInt(md.bloomAmount || 40)) / 3);
-        [1, 2, 3].forEach(i => stages.push({ name: `Pour ${i}`, duration: "35", action: `Pour ${pp}g in slow spirals` }));
+        const lines = md.pours.split("\n").filter(l => l.trim() && !l.includes("dose") && !l.includes("water") && !l.includes("temp") && !l.includes("grind"));
+        lines.forEach((l, i) => { const m = l.match(/(\d+)\s*s/i); if (m) stages.push({ name: `Pour ${i+1}`, duration: m[1], action: l.replace(/^\d+:\d+\s*—?\s*/, "").trim() }); });
+      }
+      if (stages.length <= 1) {
+        const pp = Math.round((parseInt(md.water||300) - parseInt(md.bloomAmount||40)) / 3);
+        [1,2,3].forEach(i => stages.push({ name: `Pour ${i}`, duration: "35", action: `Pour ${pp}g in slow spirals` }));
       }
     }
     if (stages.length) { setTimerStages(stages); setShowTimer(true); }
@@ -600,7 +601,7 @@ function App() {
         if (m === "aeropress") return `  AeroPress: ${d.dose}g / ${d.water}g / ${d.temp}°F / steep ${d.steepTime}s${glt}`;
         return `  Pour Over: ${d.dose}g / ${d.water}g / ${d.temp}°F${glt}`;
       }).join("\n");
-      return `${b.roaster} — ${b.name}${b.rating ? ` [${b.rating}/10]` : ""}\n${b.origin} | ${b.process} | ${b.roast}\n${secs}`;
+      return `${b.roaster} — ${b.name}${b.rating ? ` [${b.rating}/10]` : ""}${b.inStock === false ? " [OUT]" : ""}\n${b.origin} | ${b.process} | ${b.roast}\n${secs}`;
     }).join("\n\n────\n\n");
     navigator.clipboard.writeText(text).catch(() => {});
     setCopied(true); setTimeout(() => setCopied(false), 2000);
@@ -608,26 +609,23 @@ function App() {
 
   const saveApiKey = () => { window._COFFEE_API_KEY = apiKeyInput.trim(); try { localStorage.setItem("coffeeLog_apikey", apiKeyInput.trim()); } catch {} setShowApiModal(false); };
 
-  const TEMPS = ["195","196","197","198","199","200","200.5","201","201.5","202","203","204","205","206","207","208","209","210"].map(v => ({ value: v, label: v + "°F" }));
-  const DOSES_ESP = ["15","16","17","18","19","20"].map(v => ({ value: v, label: v + "g" }));
+  // Dropdown options
+  const TEMPS = ["195","195.5","196","196.5","197","197.5","198","198.5","199","199.5","200","200.5","201","201.5","202","202.5","203","204","205","206","207","208","209","210"].map(v => ({ value: v, label: v + "°F" }));
+  const DOSES_ESP = ["15","16","17","17.5","18","18.5","19","19.5","20"].map(v => ({ value: v, label: v + "g" }));
   const DOSES_MAN = ["12","13","14","15","16","17","18","19","20","21","22"].map(v => ({ value: v, label: v + "g" }));
   const YIELD_OPTS = ["28","30","32","34","36","38","40","42","44"].map(v => ({ value: v, label: v + "g" }));
-  const TIME_OPTS = ["22","24","25","26","27","28","29","30","31","32","33","34","35","36","38","40"].map(v => ({ value: v, label: v + "s" }));
+  const TIME_OPTS = ["20","22","24","25","26","27","28","29","30","31","32","33","34","35","36","38","40","42","45"].map(v => ({ value: v, label: v + "s" }));
   const WATER_OPTS = ["150","160","170","180","190","200","210","220"].map(v => ({ value: v, label: v + "g" }));
   const STEEP_OPTS = ["45","60","75","90","105","120","150","180"].map(v => ({ value: v, label: v + "s" }));
   const BLOOM_T = ["20","25","30","35","40","45","50","60"].map(v => ({ value: v, label: v + "s" }));
   const ROAST_OPTS = ["Light","Light-Medium","Medium","Medium-Dark","Dark"];
   const PROCESS_OPTS = ["Washed","Natural","Honey","Anaerobic","Co-ferment","Washed co-ferment & washed","Wet-hulled","Other"];
 
-  const TimerBtn = ({ method }) => (
-    <button className="btn timer-btn" onClick={() => launchTimer(method)}>▶ Start {METHOD_LABELS[method]} Timer</button>
-  );
-
   const GrindInline = () => (
     <div className="grind-inline">
       <div>
         <div className="gi-lbl">Current Grind</div>
-        {latestGrind ? <><div className="gi-val">{grindLabel(latestGrind.position)}</div>{latestGrind.note && <div className="gi-sub">{latestGrind.note}</div>}</> : <div className="gi-none">Not logged yet</div>}
+        {latestGrind ? <><div className="gi-val">{grindLabel(latestGrind.position)}</div>{latestGrind.note && <div className="gi-sub">{latestGrind.note}</div>}</> : <div className="gi-none">Not logged</div>}
       </div>
       <button className="btn sm" onClick={() => setActiveTab("grind")}>{latestGrind ? "History" : "Log"}</button>
     </div>
@@ -641,12 +639,26 @@ function App() {
     </>
   );
 
-  const AiSection = () => (
+  const AiSection = ({ showSave, showApply }) => (
     <>
       {aiLoading && <div className="ai-loading"><div className="ai-dot"/><div className="ai-dot"/><div className="ai-dot"/></div>}
-      {aiResult && <div className="ai-box"><div className="ai-lbl">Result</div><div className="ai-result">{aiResult}</div></div>}
+      {aiResult && (
+        <div className="ai-box">
+          <div className="ai-lbl">Result</div>
+          <div className="ai-result">{aiResult}</div>
+          {showSave && (
+            <div style={{marginTop:10,display:"flex",gap:8,flexWrap:"wrap"}}>
+              <button className="btn p sm" onClick={() => { saveRecipe(aiResult); }}>Save Recipe</button>
+              {showApply && <button className="btn sm" style={{borderColor:"var(--green)",color:"var(--green)"}} onClick={() => { applyRecipeToShot(aiResult); saveRecipe(aiResult); }}>Save & Apply to Shot</button>}
+            </div>
+          )}
+        </div>
+      )}
     </>
   );
+
+  const imageUrl = current?.imageBase64 || current?.imageUrl;
+  const draftImageUrl = beanDraft?.imageBase64 || beanDraft?.imageUrl;
 
   return (
     <div className="app">
@@ -655,10 +667,10 @@ function App() {
         *,*::before,*::after{box-sizing:border-box;margin:0;padding:0;}
         html,body{background:#1a1410;height:100%;-webkit-text-size-adjust:100%;}
         :root{--bg:#1a1410;--bg2:#1f1812;--bg3:#241c10;--border:#3a2e22;--border2:#2e2418;--gold:#d4aa7a;--text:#f0e8dc;--text2:#c8b898;--text3:#9a8268;--muted:#6a5540;--dim:#4a3a28;--green:#90b878;--red:#c07878;--blue:#789ab8;--purple:#b8a0e0;}
-        .app{min-height:100vh;background:var(--bg);color:var(--text);font-family:'DM Mono',monospace;display:flex;flex-direction:column;}
+        .app{height:100%;background:var(--bg);color:var(--text);font-family:'DM Mono',monospace;display:flex;flex-direction:column;overflow:hidden;}
 
         /* HEADER */
-        .hdr{padding:14px 16px 12px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between;background:var(--bg2);position:sticky;top:0;z-index:20;}
+        .hdr{padding:14px 16px 12px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between;background:var(--bg2);flex-shrink:0;}
         .hdr-l{display:flex;align-items:center;gap:10px;}
         .back{font-size:24px;color:var(--gold);background:none;border:none;cursor:pointer;padding:0;-webkit-tap-highlight-color:transparent;line-height:1;}
         .hdr-brand h1{font-family:'Playfair Display',serif;font-size:20px;font-weight:400;color:var(--gold);line-height:1;}
@@ -667,7 +679,7 @@ function App() {
 
         /* BUTTONS */
         .btn{font-family:'DM Mono',monospace;font-size:10px;letter-spacing:1px;text-transform:uppercase;padding:7px 13px;border:1px solid var(--dim);background:transparent;color:var(--text3);cursor:pointer;transition:all .15s;-webkit-tap-highlight-color:transparent;border-radius:0;}
-        .btn:hover,.btn:active{border-color:var(--gold);color:var(--gold);}
+        .btn:active{border-color:var(--gold);color:var(--gold);}
         .btn.p{background:var(--gold);border-color:var(--gold);color:var(--bg);font-weight:500;}
         .btn.d{border-color:#5a2a2a;color:var(--red);}
         .btn.sm{padding:5px 10px;font-size:9px;}
@@ -675,95 +687,105 @@ function App() {
         .btn.ai{background:#1e1628;border-color:#4a3a6a;color:var(--purple);}
         .btn.ai:disabled{opacity:.5;cursor:not-allowed;}
         .btn.icon{padding:6px 10px;font-size:15px;border-color:transparent;}
-        .btn.timer-btn{background:#1a2a1a;border-color:#3a5a3a;color:var(--green);font-size:11px;padding:11px 16px;width:100%;text-align:center;margin-bottom:14px;letter-spacing:1px;}
+        .btn.timer-btn{background:#1a2a1a;border-color:#3a5a3a;color:var(--green);font-size:11px;padding:11px 16px;width:100%;text-align:center;margin-bottom:14px;}
+        .btn.stock-btn{font-size:9px;padding:4px 10px;}
+        .btn.stock-btn.in{border-color:#3a5a28;color:var(--green);}
+        .btn.stock-btn.out{border-color:#5a2a2a;color:var(--red);}
+        .btn.brewing-btn{font-size:9px;padding:4px 10px;border-color:#3a4a6a;color:var(--blue);}
+        .btn.brewing-btn.active{background:#1a2038;border-color:var(--blue);color:var(--blue);}
 
         /* LAYOUT */
-        .dl{display:flex;flex:1;min-height:0;}
+        .dl{display:flex;flex:1;min-height:0;overflow:hidden;}
 
-        /* BEAN LIST — redesigned */
-        .bean-list-wrap{overflow-y:auto;display:flex;flex-direction:column;}
-        .list-header{padding:20px 16px 12px;background:var(--bg2);}
-        .list-header-title{font-family:'Playfair Display',serif;font-size:15px;color:var(--text3);font-style:italic;}
+        /* BEAN LIST */
+        .bean-list-wrap{display:flex;flex-direction:column;overflow:hidden;width:100%;}
+        .list-header{padding:18px 16px 12px;background:var(--bg2);flex-shrink:0;}
+        .list-header-title{font-family:'Playfair Display',serif;font-size:16px;color:var(--text3);font-style:italic;}
         .list-header-count{font-size:9px;color:var(--dim);letter-spacing:1px;text-transform:uppercase;margin-top:2px;}
+        .list-scroll{flex:1;overflow-y:auto;-webkit-overflow-scrolling:touch;}
         .bean-card{padding:14px 16px;border-bottom:1px solid var(--border2);cursor:pointer;-webkit-tap-highlight-color:transparent;display:flex;gap:12px;align-items:center;}
-        .bean-card:active,.bean-card.sel{background:var(--bg3);}
-        .bean-card.sel{border-left:3px solid var(--gold);}
-        .bean-card-img{width:42px;height:42px;border-radius:4px;object-fit:cover;background:var(--bg3);border:1px solid var(--border);flex-shrink:0;display:flex;align-items:center;justify-content:center;font-size:18px;}
+        .bean-card:active{background:var(--bg3);}
+        .bean-card.sel{background:var(--bg3);border-left:3px solid var(--gold);}
+        .bean-card.out-of-stock{opacity:0.5;}
+        .bean-card-img{width:44px;height:44px;border-radius:4px;object-fit:cover;background:var(--bg3);border:1px solid var(--border);flex-shrink:0;display:flex;align-items:center;justify-content:center;font-size:20px;overflow:hidden;}
         .bean-card-body{flex:1;min-width:0;}
         .bc-name{font-family:'Playfair Display',serif;font-size:15px;color:var(--gold);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
         .bc-roaster{font-size:9px;color:var(--muted);margin-top:1px;}
         .bc-meta{font-size:9px;color:var(--dim);margin-top:2px;}
+        .bc-badges{display:flex;gap:5px;margin-top:3px;flex-wrap:wrap;}
+        .bc-badge{font-size:8px;letter-spacing:.5px;text-transform:uppercase;padding:1px 6px;border-radius:2px;}
+        .bc-badge.brewing{background:#1a2038;color:var(--blue);border:1px solid #3a4a6a;}
+        .bc-badge.out{background:#2a1010;color:var(--red);border:1px solid #5a2a2a;}
         .bc-rating{font-size:10px;color:var(--gold);margin-top:2px;}
         .bc-arrow{color:var(--dim);font-size:16px;flex-shrink:0;}
-        .list-footer{padding:12px 16px;border-top:1px solid var(--border2);background:var(--bg2);}
+        .list-footer{padding:12px 16px;border-top:1px solid var(--border2);background:var(--bg2);flex-shrink:0;}
 
         /* DETAIL */
-        .detail{flex:1;overflow-y:auto;padding:0 0 60px;}
-        .bean-hero{position:relative;background:var(--bg2);border-bottom:1px solid var(--border);}
-        .bean-hero-img{width:100%;height:140px;object-fit:cover;opacity:0.6;}
-        .bean-hero-content{padding:16px 16px 14px;}
-        .bean-title{font-family:'Playfair Display',serif;font-size:24px;color:var(--gold);line-height:1.1;}
-        .bean-roaster{font-size:9px;color:var(--muted);letter-spacing:2px;text-transform:uppercase;margin-top:4px;}
-        .bean-rating-row{margin-top:10px;}
+        .detail{flex:1;overflow-y:auto;-webkit-overflow-scrolling:touch;display:flex;flex-direction:column;}
+        .bean-hero{background:var(--bg2);border-bottom:1px solid var(--border);flex-shrink:0;}
+        .bean-hero-img{width:100%;height:130px;object-fit:cover;opacity:0.65;display:block;}
+        .bean-hero-content{padding:14px 16px 12px;}
+        .bean-title{font-family:'Playfair Display',serif;font-size:22px;color:var(--gold);line-height:1.1;}
+        .bean-roaster-lbl{font-size:9px;color:var(--muted);letter-spacing:2px;text-transform:uppercase;margin-top:3px;}
+        .bean-actions-row{display:flex;gap:6px;margin-top:10px;flex-wrap:wrap;align-items:center;}
+        .roast-date{font-size:9px;color:var(--muted);}
         .pills{display:flex;gap:6px;flex-wrap:wrap;margin-top:8px;}
         .pill{font-size:8px;letter-spacing:1px;text-transform:uppercase;color:var(--text3);border:1px solid var(--border);padding:3px 8px;}
-        .roast-date{font-size:9px;color:var(--muted);margin-top:6px;}
+        .rating-wrap{margin-top:10px;}
+        .rating-stars{display:flex;gap:3px;margin-bottom:3px;}
+        .star-container{position:relative;font-size:18px;}
+        .star-bg{color:var(--dim);}
+        .star-fg{position:absolute;left:0;top:0;overflow:hidden;color:var(--gold);white-space:nowrap;}
+        .rating-val{font-size:10px;color:var(--text3);margin-bottom:5px;}
+        .rating-slider{-webkit-appearance:none;appearance:none;width:100%;height:3px;background:var(--border);outline:none;border-radius:2px;}
+        .rating-slider::-webkit-slider-thumb{-webkit-appearance:none;width:18px;height:18px;border-radius:50%;background:var(--gold);cursor:pointer;}
 
-        /* METHOD + TABS */
-        .method-row{display:flex;border-bottom:1px solid var(--border);background:var(--bg2);overflow-x:auto;scrollbar-width:none;}
+        /* TABS */
+        .method-row{display:flex;border-bottom:1px solid var(--border);background:var(--bg2);overflow-x:auto;scrollbar-width:none;flex-shrink:0;}
         .method-row::-webkit-scrollbar{display:none;}
         .method-btn{font-family:'DM Mono',monospace;font-size:9px;letter-spacing:2px;text-transform:uppercase;padding:10px 15px;color:var(--dim);border-bottom:2px solid transparent;margin-bottom:-1px;cursor:pointer;white-space:nowrap;flex-shrink:0;-webkit-tap-highlight-color:transparent;border-left:none;border-right:none;border-top:none;background:none;}
         .method-btn.active{color:var(--gold);border-bottom-color:var(--gold);}
-        .tabs{display:flex;border-bottom:1px solid var(--border);overflow-x:auto;scrollbar-width:none;}
+        .tabs{display:flex;border-bottom:1px solid var(--border);overflow-x:auto;scrollbar-width:none;flex-shrink:0;}
         .tabs::-webkit-scrollbar{display:none;}
         .tab{font-family:'DM Mono',monospace;font-size:9px;letter-spacing:2px;text-transform:uppercase;padding:9px 13px;cursor:pointer;color:var(--muted);border-bottom:2px solid transparent;margin-bottom:-1px;white-space:nowrap;-webkit-tap-highlight-color:transparent;flex-shrink:0;border-left:none;border-right:none;border-top:none;background:none;}
         .tab.active{color:var(--gold);border-bottom-color:var(--gold);}
-        .tab-content{padding:16px 16px 0;}
+        .tab-content{padding:16px 16px 80px;flex:1;}
 
-        /* PARAMS with DROPDOWN */
+        /* PARAMS */
+        .div{height:1px;background:var(--border);margin:16px 0;}
         .pg{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:14px;}
-        .pm{background:var(--bg3);border:1px solid var(--border);padding:12px 13px;position:relative;transition:border-color .2s;}
-        .pm:hover{border-color:var(--text3);}
+        .pm{background:var(--bg3);border:1px solid var(--border);padding:12px 13px;position:relative;transition:border-color .15s;}
+        .pm:active{border-color:var(--text3);}
         .pm.w{grid-column:span 2;}
         .pm-lbl{font-size:7px;letter-spacing:2px;text-transform:uppercase;color:var(--muted);margin-bottom:4px;}
         .pm-val{font-size:19px;color:var(--text);font-weight:500;line-height:1.1;}
         .pm-val.sm{font-size:12px;}
         .pm-unit{font-size:9px;color:var(--muted);margin-left:2px;}
-        .param-dropdown{position:absolute;top:100%;left:0;right:0;background:var(--bg2);border:1px solid var(--gold);z-index:30;padding:8px;min-width:140px;box-shadow:0 8px 24px rgba(0,0,0,.6);}
-        .param-opts{display:flex;flex-direction:column;gap:2px;max-height:200px;overflow-y:auto;margin-bottom:6px;}
-        .param-opt{font-family:'DM Mono',monospace;font-size:11px;padding:8px 10px;text-align:left;background:transparent;border:1px solid transparent;color:var(--text2);cursor:pointer;-webkit-tap-highlight-color:transparent;}
-        .param-opt:hover,.param-opt:active{background:var(--bg3);border-color:var(--border);color:var(--gold);}
-        .param-opt.sel{color:var(--gold);border-color:var(--border);}
+        .param-dropdown{position:absolute;top:100%;left:0;right:0;background:var(--bg2);border:1px solid var(--gold);z-index:50;padding:8px;box-shadow:0 8px 24px rgba(0,0,0,.8);}
+        .param-opts{display:flex;flex-direction:column;gap:2px;max-height:180px;overflow-y:auto;margin-bottom:6px;}
+        .param-opt{font-family:'DM Mono',monospace;font-size:12px;padding:9px 10px;text-align:left;background:transparent;border:1px solid transparent;color:var(--text2);cursor:pointer;-webkit-tap-highlight-color:transparent;}
+        .param-opt:active{background:var(--bg3);color:var(--gold);}
+        .param-opt.sel{color:var(--gold);}
         .param-opt.custom-opt{color:var(--muted);border-top:1px solid var(--border);margin-top:4px;padding-top:8px;}
         .param-custom{display:flex;flex-direction:column;}
         .param-custom-input{font-family:'DM Mono',monospace;font-size:16px;background:var(--bg3);border:1px solid var(--gold);color:var(--text);padding:8px 10px;outline:none;-webkit-appearance:none;border-radius:0;}
         .param-close{position:absolute;top:4px;right:6px;background:none;border:none;color:var(--muted);font-size:14px;cursor:pointer;padding:2px;}
-
-        /* GRIND INLINE */
         .grind-inline{background:var(--bg3);border:1px solid var(--border);padding:12px 13px;margin-bottom:14px;display:flex;align-items:center;justify-content:space-between;gap:10px;}
         .gi-lbl{font-size:7px;letter-spacing:2px;text-transform:uppercase;color:var(--muted);margin-bottom:3px;}
         .gi-val{font-size:25px;color:var(--gold);letter-spacing:3px;font-weight:500;line-height:1;}
         .gi-sub{font-size:10px;color:var(--muted);margin-top:3px;}
         .gi-none{font-size:11px;color:var(--dim);}
-
-        /* SECTIONS */
-        .div{height:1px;background:var(--border);margin:16px 0;}
         .sec{margin-bottom:13px;}
         .sec-lbl{font-size:7px;letter-spacing:2.5px;text-transform:uppercase;color:var(--muted);margin-bottom:6px;}
         .sec-txt{font-size:13px;color:var(--text2);line-height:1.75;}
 
-        /* RATING */
-        .rating-wrap{margin-bottom:8px;}
-        .rating-stars{display:flex;gap:2px;margin-bottom:4px;}
-        .star-container{position:relative;font-size:20px;color:var(--dim);}
-        .star-bg{color:var(--dim);}
-        .star-fg{position:absolute;left:0;top:0;overflow:hidden;color:var(--gold);white-space:nowrap;}
-        .rating-val{font-size:11px;color:var(--text3);margin-bottom:6px;}
-        .rating-slider-wrap{width:100%;}
-        .rating-slider{-webkit-appearance:none;appearance:none;width:100%;height:4px;background:var(--border);outline:none;border-radius:2px;}
-        .rating-slider::-webkit-slider-thumb{-webkit-appearance:none;width:20px;height:20px;border-radius:50%;background:var(--gold);cursor:pointer;}
+        /* SAVED RECIPES */
+        .saved-recipe{background:var(--bg3);border:1px solid var(--border);padding:13px;margin-bottom:10px;}
+        .saved-recipe-date{font-size:8px;color:var(--muted);letter-spacing:1px;text-transform:uppercase;margin-bottom:6px;}
+        .saved-recipe-text{font-size:12px;color:var(--text2);line-height:1.7;white-space:pre-wrap;margin-bottom:8px;}
+        .saved-recipe-actions{display:flex;gap:8px;flex-wrap:wrap;}
 
-        /* GRIND LOG */
+        /* GRIND */
         .grind-groups{display:flex;flex-wrap:wrap;gap:4px;margin:8px 0;}
         .grind-group{display:flex;gap:2px;margin-bottom:2px;}
         .grind-pos{font-family:'DM Mono',monospace;font-size:11px;padding:7px 7px;background:var(--bg3);border:1px solid var(--border);color:var(--muted);cursor:pointer;min-width:34px;text-align:center;-webkit-tap-highlight-color:transparent;}
@@ -786,14 +808,15 @@ function App() {
         .field input:focus,.field textarea:focus{border-color:var(--gold);}
         .field.full{grid-column:1/-1;}
         .sel-input{background:var(--bg3);border:1px solid var(--border);color:var(--text);font-family:'DM Mono',monospace;font-size:16px;padding:9px 11px;outline:none;-webkit-appearance:none;border-radius:0;width:100%;}
-        .sel-input:focus{border-color:var(--gold);}
         .fa{display:flex;gap:8px;margin-top:8px;flex-wrap:wrap;}
         .toggle-btn{background:var(--bg3);border:1px solid var(--border);color:var(--muted);font-family:'DM Mono',monospace;font-size:13px;padding:8px 14px;cursor:pointer;text-align:left;border-radius:0;}
         .toggle-btn.on{border-color:var(--gold);color:var(--gold);background:#2a1e0a;}
         .url-row{display:flex;gap:8px;margin-bottom:10px;}
         .url-row input{flex:1;background:var(--bg3);border:1px solid var(--border);color:var(--text);font-family:'DM Mono',monospace;font-size:14px;padding:9px 11px;outline:none;-webkit-appearance:none;border-radius:0;}
-        .url-row input:focus{border-color:var(--gold);}
         .url-preview{background:#1a2818;border:1px solid #3a5a28;padding:10px;margin-bottom:10px;font-size:11px;color:var(--green);line-height:1.6;}
+        .photo-upload-wrap{border:1px dashed var(--border);padding:14px;text-align:center;cursor:pointer;margin-bottom:10px;}
+        .photo-upload-wrap:active{border-color:var(--gold);}
+        .photo-preview{width:100%;max-height:120px;object-fit:cover;margin-bottom:8px;border-radius:2px;}
 
         /* AI */
         .ai-box{background:#1a1628;border:1px solid #3a2e50;padding:13px;margin-bottom:13px;}
@@ -805,20 +828,23 @@ function App() {
         @keyframes pulse{0%,80%,100%{opacity:.3;transform:scale(.8);}40%{opacity:1;transform:scale(1);}}
         .ai-ta{width:100%;background:#1a1628;border:1px solid #3a2e50;color:#d0c8e8;font-family:'DM Mono',monospace;font-size:14px;padding:10px 12px;outline:none;resize:none;border-radius:0;-webkit-appearance:none;margin-bottom:10px;display:block;}
         .ai-ta:focus{border-color:#6a50a0;}
+        .diag-inputs{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:10px;}
+        .diag-input{background:#1a1628;border:1px solid #3a2e50;color:#d0c8e8;font-family:'DM Mono',monospace;font-size:16px;padding:9px 11px;outline:none;-webkit-appearance:none;border-radius:0;width:100%;}
+        .diag-input-label{font-size:7px;letter-spacing:2px;text-transform:uppercase;color:#7a6898;margin-bottom:4px;display:block;}
 
         /* COMPASS */
         .compass-wrap{background:var(--bg3);border:1px solid var(--border);padding:14px;margin-bottom:14px;}
         .compass-title{font-family:'Playfair Display',serif;font-size:15px;color:var(--gold);margin-bottom:2px;}
-        .compass-subtitle{font-size:9px;color:var(--muted);letter-spacing:1px;margin-bottom:12px;}
-        .compass-grid{position:relative;}
-        .compass-axis-x-labels{display:flex;justify-content:space-between;font-size:8px;color:var(--dim);letter-spacing:.5px;margin-bottom:4px;}
-        .compass-axis-y-label-left{position:absolute;left:-8px;top:50%;transform:translateY(-50%) rotate(-90deg);font-size:8px;color:var(--dim);white-space:nowrap;}
-        .compass-axis-y-label-right{position:absolute;right:-8px;top:50%;transform:translateY(-50%) rotate(90deg);font-size:8px;color:var(--dim);white-space:nowrap;}
-        .compass-svg-wrap{position:relative;padding:0 16px;}
+        .compass-subtitle{font-size:9px;color:var(--muted);letter-spacing:1px;margin-bottom:10px;}
+        .compass-axis-x-labels{display:flex;justify-content:space-between;font-size:8px;color:var(--dim);margin-bottom:4px;}
+        .compass-svg-wrap{position:relative;}
+        .compass-y-label{position:absolute;font-size:8px;color:var(--dim);right:-2px;}
+        .compass-y-label.top{top:4px;}
+        .compass-y-label.bottom{bottom:4px;}
         .compass-svg{width:100%;background:#1e1810;border:1px solid var(--border);display:block;}
-        .compass-result{margin-top:12px;padding:12px;background:#1a1610;border:1px solid var(--border);}
-        .compass-result-label{font-size:14px;font-weight:500;margin-bottom:4px;}
-        .compass-result-desc{font-size:11px;color:var(--text3);margin-bottom:6px;}
+        .compass-result{margin-top:10px;padding:10px;background:#1a1610;border:1px solid var(--border);}
+        .compass-result-label{font-size:13px;font-weight:500;margin-bottom:3px;}
+        .compass-result-desc{font-size:11px;color:var(--text3);margin-bottom:5px;}
         .compass-result-fix{font-size:12px;color:var(--text2);line-height:1.6;}
 
         /* INFO SHEET */
@@ -842,8 +868,8 @@ function App() {
         .timer-action{font-size:12px;color:var(--text3);margin-bottom:18px;line-height:1.5;min-height:36px;padding:0 8px;}
         .timer-btns{display:flex;gap:8px;justify-content:center;flex-wrap:wrap;}
 
-        /* MODALS */
-        .modal-overlay{position:fixed;inset:0;background:rgba(0,0,0,.8);z-index:50;display:flex;align-items:center;justify-content:center;padding:20px;}
+        /* MODAL */
+        .modal-overlay{position:fixed;inset:0;background:rgba(0,0,0,.85);z-index:50;display:flex;align-items:center;justify-content:center;padding:20px;}
         .modal{background:var(--bg2);border:1px solid var(--border);padding:22px;width:100%;max-width:380px;max-height:90vh;overflow-y:auto;}
         .modal h2{font-family:'Playfair Display',serif;font-size:18px;color:var(--gold);margin-bottom:8px;}
         .modal p{font-size:11px;color:var(--text3);line-height:1.7;margin-bottom:10px;}
@@ -857,9 +883,10 @@ function App() {
         @media(min-width:680px){
           .back{display:none!important;}
           .bc-arrow{display:none!important;}
-          .sidebar-wrap{width:220px;min-width:180px;border-right:1px solid var(--border);flex-shrink:0;display:flex;flex-direction:column;}
-          .tab-content{padding:20px 28px 0;}
-          .bean-hero-content{padding:18px 28px 16px;}
+          .dl{overflow:hidden;}
+          .bean-list-wrap{width:220px;min-width:180px;border-right:1px solid var(--border);flex-shrink:0;}
+          .tab-content{padding:20px 28px 40px;}
+          .bean-hero-content{padding:18px 28px 14px;}
           .pg{grid-template-columns:repeat(3,1fr);}
           .pm.w{grid-column:span 1;}
         }
@@ -869,10 +896,7 @@ function App() {
       <div className="hdr">
         <div className="hdr-l">
           {isMobile && !showList && <button className="back" onClick={() => { setShowList(true); setEditing(false); setAdding(false); }}>‹</button>}
-          <div className="hdr-brand">
-            <h1>Coffee Log</h1>
-            <p>Micra · E64S · V60 · AeroPress</p>
-          </div>
+          <div className="hdr-brand"><h1>Coffee Log</h1><p>Micra · E64S · V60 · AeroPress</p></div>
         </div>
         <div className="hdr-r">
           <button className="btn sm" onClick={exportText}>{copied ? "✓" : "Export"}</button>
@@ -882,37 +906,45 @@ function App() {
 
       <div className="dl">
         {/* BEAN LIST */}
-        <div className="sidebar-wrap bean-list-wrap" style={(!showList && isMobile) ? { display: "none" } : {}}>
+        <div className="bean-list-wrap" style={(isMobile && !showList) ? {display:"none"} : {}}>
           <div className="list-header">
             <div className="list-header-title">Your Beans</div>
-            <div className="list-header-count">{beans.length} {beans.length === 1 ? "bean" : "beans"} in your collection</div>
+            <div className="list-header-count">{beans.length} {beans.length===1?"bean":"beans"} · {beans.filter(b=>b.inStock!==false).length} in stock</div>
           </div>
-          {beans.length === 0 && <div className="empty">No beans yet — add your first</div>}
-          {beans.map(b => {
-            const eg = b.grindLogs?.espresso?.slice(-1)[0];
-            const da = daysAgo(b.roastDate);
-            return (
-              <div key={b.id} className={"bean-card" + (selectedId === b.id ? " sel" : "")} onClick={() => selectBean(b.id)}>
-                <div className="bean-card-img">
-                  {b.imageUrl ? <img src={b.imageUrl} alt={b.name} style={{width:"100%",height:"100%",objectFit:"cover",borderRadius:4}} onError={e => e.target.style.display="none"} /> : "☕"}
+          <div className="list-scroll">
+            {beans.length === 0 && <div className="empty">No beans yet — add your first</div>}
+            {beans.map(b => {
+              const eg = b.grindLogs?.espresso?.slice(-1)[0];
+              const da = daysAgo(b.roastDate);
+              const img = b.imageBase64 || b.imageUrl;
+              const outOfStock = b.inStock === false;
+              return (
+                <div key={b.id} className={"bean-card"+(selectedId===b.id?" sel":"")+(outOfStock?" out-of-stock":"")} onClick={() => selectBean(b.id)}>
+                  <div className="bean-card-img">
+                    {img ? <img src={img} alt={b.name} style={{width:"100%",height:"100%",objectFit:"cover"}} onError={e=>e.target.style.display="none"}/> : "☕"}
+                  </div>
+                  <div className="bean-card-body">
+                    <div className="bc-name">{b.name}</div>
+                    <div className="bc-roaster">{b.roaster}</div>
+                    <div className="bc-meta">{b.roast}{da?" · "+da:""}{eg?" · esp "+grindLabel(eg.position):""}</div>
+                    <div className="bc-badges">
+                      {b.currentlyBrewing && <span className="bc-badge brewing">Brewing Now</span>}
+                      {outOfStock && <span className="bc-badge out">Out of Stock</span>}
+                    </div>
+                    {b.rating > 0 && <div className="bc-rating">{"★".repeat(Math.round(b.rating/2))} {b.rating}/10</div>}
+                  </div>
+                  <span className="bc-arrow">›</span>
                 </div>
-                <div className="bean-card-body">
-                  <div className="bc-name">{b.name}</div>
-                  <div className="bc-roaster">{b.roaster}</div>
-                  <div className="bc-meta">{b.roast}{da ? " · " + da : ""}{eg ? " · esp " + grindLabel(eg.position) : ""}</div>
-                  {b.rating > 0 && <div className="bc-rating">{"★".repeat(Math.round(b.rating / 2))} {b.rating}/10</div>}
-                </div>
-                <span className="bc-arrow">›</span>
-              </div>
-            );
-          })}
+              );
+            })}
+          </div>
           <div className="list-footer">
             <button className="btn p full" onClick={startAdd}>+ Add Bean</button>
           </div>
         </div>
 
         {/* DETAIL */}
-        <div className="detail" style={(showList && isMobile) ? { display: "none" } : {}}>
+        <div className="detail" style={(isMobile && showList) ? {display:"none"} : {}}>
 
           {/* ADD BEAN */}
           {adding && beanDraft && (
@@ -920,25 +952,33 @@ function App() {
               <div style={{fontFamily:"'Playfair Display',serif",fontSize:20,color:"var(--gold)",marginBottom:16}}>New Bean</div>
               <div className="sec-lbl" style={{marginBottom:8}}>Import from URL</div>
               <div className="url-row">
-                <input placeholder="Paste roaster product URL..." value={urlInput} onChange={e => setUrlInput(e.target.value)} />
-                <button className="btn ai" onClick={importFromUrl} disabled={urlLoading || !urlInput.trim()}>{urlLoading ? "..." : "Import"}</button>
+                <input placeholder="Paste roaster product URL..." value={urlInput} onChange={e => setUrlInput(e.target.value)}/>
+                <button className="btn ai" onClick={importFromUrl} disabled={urlLoading||!urlInput.trim()}>{urlLoading?"...":"Import"}</button>
               </div>
               {urlLoading && <div className="ai-loading"><div className="ai-dot"/><div className="ai-dot"/><div className="ai-dot"/></div>}
-              {urlImport && !urlImport.error && <div className="url-preview">✓ {urlImport.name} by {urlImport.roaster} — {urlImport.origin} · {urlImport.process} · {urlImport.roast}</div>}
+              {urlImport && !urlImport.error && <div className="url-preview">✓ {urlImport.name} by {urlImport.roaster}</div>}
               {urlImport?.error && <div style={{color:"var(--red)",fontSize:11,marginBottom:10}}>{urlImport.error}</div>}
               <div className="div"/>
               <div className="fg">
-                <Field label="Roaster" value={beanDraft.roaster} onChange={v => setBeanDraft(d => ({...d,roaster:v}))} />
-                <Field label="Bean Name" value={beanDraft.name} onChange={v => setBeanDraft(d => ({...d,name:v}))} />
-                <Field label="Origin" value={beanDraft.origin} onChange={v => setBeanDraft(d => ({...d,origin:v}))} />
-                <div className="field"><label>Process</label><select className="sel-input" value={beanDraft.process} onChange={e => setBeanDraft(d => ({...d,process:e.target.value}))}><option value="">Select...</option>{PROCESS_OPTS.map(o => <option key={o} value={o}>{o}</option>)}</select></div>
-                <div className="field"><label>Roast Level</label><select className="sel-input" value={beanDraft.roast} onChange={e => setBeanDraft(d => ({...d,roast:e.target.value}))}><option value="">Select...</option>{ROAST_OPTS.map(o => <option key={o} value={o}>{o}</option>)}</select></div>
-                <Field label="Roast Date" value={beanDraft.roastDate} onChange={v => setBeanDraft(d => ({...d,roastDate:v}))} placeholder="YYYY-MM-DD" />
-                <Field label="Altitude" value={beanDraft.altitude} onChange={v => setBeanDraft(d => ({...d,altitude:v}))} placeholder="e.g. 1800m" />
-                <div className="field full"><Field label="Varietal" value={beanDraft.varietal} onChange={v => setBeanDraft(d => ({...d,varietal:v}))} placeholder="e.g. Bourbon, Gesha" /></div>
-                <div className="field full"><Field label="Flavor Profile" value={beanDraft.flavorProfile} onChange={v => setBeanDraft(d => ({...d,flavorProfile:v}))} placeholder="e.g. Blueberry, chocolate, floral" /></div>
-                <div className="field full"><Field label="Bag Image URL (optional)" value={beanDraft.imageUrl} onChange={v => setBeanDraft(d => ({...d,imageUrl:v}))} placeholder="https://..." /></div>
+                <Field label="Roaster" value={beanDraft.roaster} onChange={v => setBeanDraft(d=>({...d,roaster:v}))}/>
+                <Field label="Bean Name" value={beanDraft.name} onChange={v => setBeanDraft(d=>({...d,name:v}))}/>
+                <Field label="Origin" value={beanDraft.origin} onChange={v => setBeanDraft(d=>({...d,origin:v}))}/>
+                <div className="field"><label>Process</label><select className="sel-input" value={beanDraft.process} onChange={e=>setBeanDraft(d=>({...d,process:e.target.value}))}><option value="">Select...</option>{PROCESS_OPTS.map(o=><option key={o} value={o}>{o}</option>)}</select></div>
+                <div className="field"><label>Roast Level</label><select className="sel-input" value={beanDraft.roast} onChange={e=>setBeanDraft(d=>({...d,roast:e.target.value}))}><option value="">Select...</option>{ROAST_OPTS.map(o=><option key={o} value={o}>{o}</option>)}</select></div>
+                <Field label="Roast Date" value={beanDraft.roastDate} onChange={v => setBeanDraft(d=>({...d,roastDate:v}))} placeholder="YYYY-MM-DD"/>
+                <Field label="Altitude" value={beanDraft.altitude} onChange={v => setBeanDraft(d=>({...d,altitude:v}))} placeholder="e.g. 1800m"/>
+                <div className="field full"><Field label="Varietal" value={beanDraft.varietal} onChange={v => setBeanDraft(d=>({...d,varietal:v}))} placeholder="e.g. Bourbon, Gesha"/></div>
+                <div className="field full"><Field label="Flavor Profile" value={beanDraft.flavorProfile} onChange={v => setBeanDraft(d=>({...d,flavorProfile:v}))} placeholder="e.g. Blueberry, chocolate"/></div>
               </div>
+              <div className="sec-lbl" style={{marginBottom:8}}>Bag Image</div>
+              {draftImageUrl && <img src={draftImageUrl} alt="bag" className="photo-preview"/>}
+              <div className="url-row">
+                <input placeholder="Image URL (optional)..." value={beanDraft.imageUrl} onChange={e=>setBeanDraft(d=>({...d,imageUrl:e.target.value,imageBase64:""}))}/>
+              </div>
+              <label className="photo-upload-wrap">
+                <div style={{fontSize:11,color:"var(--muted)"}}>📷 Upload photo from camera roll</div>
+                <input type="file" accept="image/*" style={{display:"none"}} onChange={e=>handlePhotoUpload(e,true)}/>
+              </label>
               <div className="fa">
                 <button className="btn p" onClick={saveNew}>Save Bean</button>
                 <button className="btn" onClick={() => { setAdding(false); setShowList(true); }}>Cancel</button>
@@ -946,34 +986,45 @@ function App() {
             </div>
           )}
 
-          {!adding && !current && !isMobile && <div className="empty" style={{paddingTop:60}}>← Select a bean to get started</div>}
+          {!adding && !current && <div className="empty" style={{paddingTop:80}}>← Select a bean</div>}
 
           {!adding && current && (
             <>
-              {/* BEAN HERO */}
+              {/* HERO */}
               <div className="bean-hero">
-                {current.imageUrl && <img src={current.imageUrl} alt={current.name} className="bean-hero-img" onError={e => e.target.style.display="none"} />}
+                {imageUrl && <img src={imageUrl} alt={current.name} className="bean-hero-img" onError={e=>e.target.style.display="none"}/>}
                 <div className="bean-hero-content">
                   <div className="bean-title">{current.name}</div>
-                  <div className="bean-roaster">{current.roaster}</div>
-                  {current.roastDate && <div className="roast-date">Roasted {daysAgo(current.roastDate) || current.roastDate}</div>}
+                  <div className="bean-roaster-lbl">{current.roaster}</div>
+                  {current.roastDate && <div className="roast-date" style={{marginTop:4}}>{daysAgo(current.roastDate) || current.roastDate}</div>}
+                  <div className="bean-actions-row">
+                    <button className={"btn stock-btn"+(current.inStock!==false?" in":" out")}
+                      onClick={() => updateBeanField("inStock", current.inStock===false)}>
+                      {current.inStock!==false ? "✓ In Stock" : "✗ Out of Stock"}
+                    </button>
+                    <button className={"btn brewing-btn"+(current.currentlyBrewing?" active":"")}
+                      onClick={() => {
+                        const newVal = !current.currentlyBrewing;
+                        upd(bs => bs.map(b => ({ ...b, currentlyBrewing: b.id === selectedId ? newVal : (newVal ? false : b.currentlyBrewing) })));
+                      }}>
+                      {current.currentlyBrewing ? "☕ Brewing Now" : "Set as Current"}
+                    </button>
+                  </div>
                   <div className="pills">
                     {current.origin && <span className="pill">{current.origin}</span>}
                     {current.process && <span className="pill">{current.process}</span>}
                     {current.roast && <span className="pill">{current.roast}</span>}
                     {current.altitude && <span className="pill">{current.altitude}</span>}
                   </div>
-                  <div className="bean-rating-row">
-                    <StarRating value={current.rating || 0} onChange={v => updateBeanField("rating", v)} />
-                  </div>
+                  <StarRating value={current.rating||0} onChange={v => updateBeanField("rating",v)}/>
                 </div>
               </div>
 
-              {/* METHOD SELECTOR */}
+              {/* METHOD */}
               <div className="method-row">
                 {METHODS.map(m => (
-                  <button key={m} className={"method-btn" + (activeMethod === m ? " active" : "")}
-                    onClick={() => { setActiveMethod(m); setActiveTab("shot"); setDiagInput(""); }}>
+                  <button key={m} className={"method-btn"+(activeMethod===m?" active":"")}
+                    onClick={() => { setActiveMethod(m); setActiveTab("shot"); setDiagInput(""); setCompassSelected(null); setShotTime(""); setShotYield(""); }}>
                     {METHOD_LABELS[m]}
                   </button>
                 ))}
@@ -983,7 +1034,7 @@ function App() {
               <div className="tabs">
                 {["shot","grind",...(activeMethod!=="espresso"?["recipe"]:[]),"diagnose","info"].map(t => (
                   <button key={t} className={"tab"+(activeTab===t&&!editing?" active":"")} onClick={() => { setActiveTab(t); setEditing(false); }}>
-                    {t==="recipe"?"AI Recipe":t==="info"?"Bean Info":t.charAt(0).toUpperCase()+t.slice(1)}
+                    {t==="recipe"?"Recipes":t==="info"?"Bean Info":t.charAt(0).toUpperCase()+t.slice(1)}
                   </button>
                 ))}
                 <button className={"tab"+(editing?" active":"")} onClick={startEdit}>Edit</button>
@@ -996,38 +1047,59 @@ function App() {
                   <>
                     {activeMethod==="espresso" && (
                       <div className="pg">
-                        <ShotParam label="Dose" value={md.dose} unit="g" onSave={v => updateMethodField("dose",v)} options={DOSES_ESP} />
-                        <ShotParam label="Yield" value={md.yield} unit="g" onSave={v => updateMethodField("yield",v)} options={YIELD_OPTS} />
-                        <ShotParam label="Time" value={md.time} unit="s" onSave={v => updateMethodField("time",v)} options={TIME_OPTS} />
-                        <ShotParam label="Temp" value={md.temp} unit="°F" onSave={v => updateMethodField("temp",v)} options={TEMPS} />
-                        <ShotParam label="Pre-brew" value={md.preBrew} onSave={v => updateMethodField("preBrew",v)} wide small />
+                        <ShotParam label="Dose" value={md.dose} unit="g" onSave={v=>updateMethodField("dose",v)} options={DOSES_ESP}/>
+                        <ShotParam label="Yield" value={md.yield} unit="g" onSave={v=>updateMethodField("yield",v)} options={YIELD_OPTS}/>
+                        <ShotParam label="Time" value={md.time} unit="s" onSave={v=>updateMethodField("time",v)} options={TIME_OPTS}/>
+                        <ShotParam label="Temp" value={md.temp} unit="°F" onSave={v=>updateMethodField("temp",v)} options={TEMPS}/>
+                        <ShotParam label="Pre-brew" value={md.preBrew} onSave={v=>updateMethodField("preBrew",v)} wide small/>
                       </div>
                     )}
                     {activeMethod==="aeropress" && (
                       <>
-                        <TimerBtn method="aeropress"/>
+                        <button className="btn timer-btn" onClick={() => launchTimer("aeropress")}>▶ Start AeroPress Timer</button>
                         <div className="pg">
-                          <ShotParam label="Dose" value={md.dose} unit="g" onSave={v => updateMethodField("dose",v)} options={DOSES_MAN} />
-                          <ShotParam label="Water" value={md.water} unit="g" onSave={v => updateMethodField("water",v)} options={WATER_OPTS} />
-                          <ShotParam label="Temp" value={md.temp} unit="°F" onSave={v => updateMethodField("temp",v)} options={TEMPS} />
-                          <ShotParam label="Steep" value={md.steepTime} unit="s" onSave={v => updateMethodField("steepTime",v)} options={STEEP_OPTS} />
-                          <ShotParam label="Press" value={md.pressTime} unit="s" onSave={v => updateMethodField("pressTime",v)} options={["20","25","30","35","40","45","60"].map(v=>({value:v,label:v+"s"}))} />
+                          <ShotParam label="Dose" value={md.dose} unit="g" onSave={v=>updateMethodField("dose",v)} options={DOSES_MAN}/>
+                          <ShotParam label="Water" value={md.water} unit="g" onSave={v=>updateMethodField("water",v)} options={WATER_OPTS}/>
+                          <ShotParam label="Temp" value={md.temp} unit="°F" onSave={v=>updateMethodField("temp",v)} options={TEMPS}/>
+                          <ShotParam label="Steep" value={md.steepTime} unit="s" onSave={v=>updateMethodField("steepTime",v)} options={STEEP_OPTS}/>
+                          <ShotParam label="Press" value={md.pressTime} unit="s" onSave={v=>updateMethodField("pressTime",v)} options={["20","25","30","35","40","45","60"].map(v=>({value:v,label:v+"s"}))}/>
                           <div className="pm"><div className="pm-lbl">Inverted</div><div className="pm-val sm">{md.inverted?"Yes":"No"}</div></div>
                           <div className="pm w"><div className="pm-lbl">Bloom</div><div className="pm-val sm">{md.bloom?"Yes — "+md.bloomTime+"s":"No"}</div></div>
                         </div>
+                        {/* Show active saved recipe if any */}
+                        {(() => { const recipes = current.savedRecipes?.aeropress||[]; const last = recipes.slice(-1)[0]; return last ? (
+                          <div style={{marginBottom:14}}>
+                            <div className="sec-lbl" style={{marginBottom:6}}>Active Recipe</div>
+                            <div className="saved-recipe">
+                              <div className="saved-recipe-date">{last.date}</div>
+                              <div className="saved-recipe-text">{last.text}</div>
+                              <button className="btn sm" onClick={() => setActiveTab("recipe")}>View All Recipes →</button>
+                            </div>
+                          </div>
+                        ) : null; })()}
                       </>
                     )}
                     {activeMethod==="pourover" && (
                       <>
-                        <TimerBtn method="pourover"/>
+                        <button className="btn timer-btn" onClick={() => launchTimer("pourover")}>▶ Start Pour Over Timer</button>
                         <div className="pg">
-                          <ShotParam label="Dose" value={md.dose} unit="g" onSave={v => updateMethodField("dose",v)} options={DOSES_MAN} />
-                          <ShotParam label="Water" value={md.water} unit="g" onSave={v => updateMethodField("water",v)} options={WATER_OPTS} />
-                          <ShotParam label="Temp" value={md.temp} unit="°F" onSave={v => updateMethodField("temp",v)} options={TEMPS} />
-                          <ShotParam label="Bloom" value={md.bloomAmount?(md.bloomAmount+"g/"+md.bloomTime+"s"):"—"} onSave={v => updateMethodField("bloomAmount",v)} wide small />
-                          <ShotParam label="Total Time" value={md.totalTime} onSave={v => updateMethodField("totalTime",v)} />
-                          <div className="pm w"><div className="pm-lbl">Pours</div><div className="pm-val sm" style={{whiteSpace:"pre-wrap"}}>{md.pours||"—"}</div></div>
+                          <ShotParam label="Dose" value={md.dose} unit="g" onSave={v=>updateMethodField("dose",v)} options={DOSES_MAN}/>
+                          <ShotParam label="Water" value={md.water} unit="g" onSave={v=>updateMethodField("water",v)} options={WATER_OPTS}/>
+                          <ShotParam label="Temp" value={md.temp} unit="°F" onSave={v=>updateMethodField("temp",v)} options={TEMPS}/>
+                          <ShotParam label="Bloom" value={md.bloomAmount?(md.bloomAmount+"g/"+md.bloomTime+"s"):"—"} onSave={v=>updateMethodField("bloomAmount",v)} wide small/>
+                          <ShotParam label="Total Time" value={md.totalTime} onSave={v=>updateMethodField("totalTime",v)}/>
                         </div>
+                        {/* Show active saved recipe */}
+                        {(() => { const recipes = current.savedRecipes?.pourover||[]; const last = recipes.slice(-1)[0]; return last ? (
+                          <div style={{marginBottom:14}}>
+                            <div className="sec-lbl" style={{marginBottom:6}}>Active Recipe</div>
+                            <div className="saved-recipe">
+                              <div className="saved-recipe-date">{last.date}</div>
+                              <div className="saved-recipe-text">{last.text}</div>
+                              <button className="btn sm" onClick={() => setActiveTab("recipe")}>View All Recipes →</button>
+                            </div>
+                          </div>
+                        ) : null; })()}
                       </>
                     )}
                     <GrindInline/>
@@ -1046,10 +1118,10 @@ function App() {
                     {addingGrind && (
                       <div className="ga-form">
                         <div className="sec-lbl" style={{marginBottom:8}}>Position ({activeMethod==="espresso"?"0–1 calibrated":"0–12 full range"})</div>
-                        <GrindSelector value={grindDraft.position} onChange={p => setGrindDraft(g => ({...g,position:p}))} />
+                        <GrindSelector value={grindDraft.position} onChange={p => setGrindDraft(g=>({...g,position:p}))}/>
                         <div style={{marginTop:12,display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
-                          <Field label="Date" value={grindDraft.date} onChange={v => setGrindDraft(g => ({...g,date:v}))} />
-                          <div style={{gridColumn:"1/-1"}}><Field label="Notes" value={grindDraft.note} onChange={v => setGrindDraft(g => ({...g,note:v}))} multiline /></div>
+                          <Field label="Date" value={grindDraft.date} onChange={v=>setGrindDraft(g=>({...g,date:v}))}/>
+                          <div style={{gridColumn:"1/-1"}}><Field label="Notes" value={grindDraft.note} onChange={v=>setGrindDraft(g=>({...g,note:v}))} multiline/></div>
                         </div>
                         <div className="fa" style={{marginTop:10}}>
                           <button className="btn p sm" onClick={saveGrind}>Save</button>
@@ -1074,49 +1146,74 @@ function App() {
                   </>
                 )}
 
-                {/* AI RECIPE TAB */}
+                {/* RECIPES TAB */}
                 {activeTab==="recipe" && !editing && activeMethod!=="espresso" && (
                   <>
                     <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
-                      <div className="sec-lbl">AI Recipe — {METHOD_LABELS[activeMethod]}</div>
+                      <div className="sec-lbl">{METHOD_LABELS[activeMethod]} Recipes</div>
                       <button className="btn sm" style={{background:"#1a2a1a",borderColor:"#3a5a3a",color:"var(--green)"}} onClick={() => launchTimer(activeMethod)}>▶ Timer</button>
                     </div>
-                    <div className="sec-txt" style={{marginBottom:12,fontSize:12}}>Starting recipe for {current.name} ({current.roast}, {current.process}).</div>
-                    <textarea className="ai-ta" rows={2} placeholder="Optional: 'bright and fruity' or 'lower acidity'..." value={recipeCtx} onChange={e => setRecipeCtx(e.target.value)} />
+
+                    {/* Saved recipes */}
+                    {(current.savedRecipes?.[activeMethod]||[]).length > 0 && (
+                      <div style={{marginBottom:16}}>
+                        <div className="sec-lbl" style={{marginBottom:8}}>Saved Recipes</div>
+                        {[...(current.savedRecipes[activeMethod])].reverse().map((recipe, i) => (
+                          <div key={recipe.id} className="saved-recipe">
+                            <div className="saved-recipe-date">{recipe.date}</div>
+                            <div className="saved-recipe-text">{recipe.text}</div>
+                            <div className="saved-recipe-actions">
+                              <button className="btn sm" style={{borderColor:"var(--green)",color:"var(--green)"}} onClick={() => applyRecipeToShot(recipe.text)}>Apply to Shot</button>
+                              <button className="btn sm" style={{borderColor:"var(--purple)",color:"var(--purple)"}} onClick={() => { setActiveRecipeIdx(current.savedRecipes[activeMethod].length-1-i); setRecipeFeedback(""); }}>Refine with AI</button>
+                              <button className="btn d sm" onClick={() => deleteRecipe(activeMethod, recipe.id)}>Delete</button>
+                            </div>
+                            {activeRecipeIdx === (current.savedRecipes[activeMethod].length-1-i) && (
+                              <div style={{marginTop:10}}>
+                                <textarea className="ai-ta" rows={2} placeholder="What would you like to change? e.g. 'Make it less acidic' or 'I want more body'..." value={recipeFeedback} onChange={e => setRecipeFeedback(e.target.value)}/>
+                                <button className="btn ai" disabled={aiLoading||!recipeFeedback.trim()} onClick={() => generateRecipe(recipeFeedback)}>{aiLoading?"Refining...":"Refine Recipe"}</button>
+                              </div>
+                            )}
+                          </div>
+                        ))}
+                        <div className="div"/>
+                      </div>
+                    )}
+
+                    {/* Generate new recipe */}
+                    <div className="sec-lbl" style={{marginBottom:6}}>Generate New Recipe</div>
+                    <div className="sec-txt" style={{marginBottom:10,fontSize:12}}>For {current.name} ({current.roast}, {current.process}).</div>
+                    <textarea className="ai-ta" rows={2} placeholder="Optional: 'bright and fruity' or 'lower acidity, more body'..." value={recipeCtx} onChange={e => setRecipeCtx(e.target.value)}/>
                     <div className="fa" style={{marginBottom:14}}>
-                      <button className="btn ai" disabled={aiLoading} onClick={generateRecipe}>{aiLoading?"Generating...":"Generate Recipe"}</button>
+                      <button className="btn ai" disabled={aiLoading} onClick={() => generateRecipe(null)}>{aiLoading?"Generating...":"Generate Recipe"}</button>
                       {aiResult && <button className="btn sm" onClick={() => setAiResult("")}>Clear</button>}
                     </div>
-                    <AiSection/>
+                    <AiSection showSave={true} showApply={true}/>
                   </>
                 )}
 
                 {/* DIAGNOSE TAB */}
                 {activeTab==="diagnose" && !editing && (
                   <>
+                    {activeMethod==="espresso" && <EspressoCompass onSelect={setCompassSelected} selected={compassSelected}/>}
                     {activeMethod==="espresso" && (
-                      <EspressoCompass onSelect={z => setCompassSelected(z)} />
-                    )}
-                    <div className="sec-lbl" style={{marginBottom:6}}>Describe Your Cup</div>
-                    <div className="sec-txt" style={{marginBottom:10,fontSize:12}}>Use the compass above and/or describe what you're tasting.</div>
-                    {activeMethod==="espresso" && (
-                      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,marginBottom:10}}>
-                        <div className="field">
-                          <label>Shot Time (s)</label>
-                          <input className="field input" value={shotTime} onChange={e => setShotTime(e.target.value)} placeholder="e.g. 32" style={{background:"#1a1628",border:"1px solid #3a2e50",color:"#d0c8e8",fontFamily:"'DM Mono',monospace",fontSize:16,padding:"9px 11px",outline:"none",borderRadius:0,WebkitAppearance:"none"}} />
+                      <div className="diag-inputs">
+                        <div>
+                          <span className="diag-input-label">Shot Time (s)</span>
+                          <input className="diag-input" value={shotTime} onChange={e=>setShotTime(e.target.value)} placeholder="e.g. 32"/>
                         </div>
-                        <div className="field">
-                          <label>Yield (g)</label>
-                          <input className="field input" value={shotYield} onChange={e => setShotYield(e.target.value)} placeholder="e.g. 36" style={{background:"#1a1628",border:"1px solid #3a2e50",color:"#d0c8e8",fontFamily:"'DM Mono',monospace",fontSize:16,padding:"9px 11px",outline:"none",borderRadius:0,WebkitAppearance:"none"}} />
+                        <div>
+                          <span className="diag-input-label">Actual Yield (g)</span>
+                          <input className="diag-input" value={shotYield} onChange={e=>setShotYield(e.target.value)} placeholder="e.g. 36"/>
                         </div>
                       </div>
                     )}
+                    <div className="sec-lbl" style={{marginBottom:6}}>Describe Your Cup</div>
                     <textarea className="ai-ta" rows={3}
-                      placeholder={activeMethod==="espresso"?"Describe taste, texture, finish — e.g. 'Sour, thin body, cinnamon finish late'":activeMethod==="aeropress"?"e.g. 'Muddy, over-extracted...'":"e.g. 'Flat, no clarity, fast drain...'"}
-                      value={diagInput} onChange={e => setDiagInput(e.target.value)} />
+                      placeholder={activeMethod==="espresso"?"Taste, texture, finish — e.g. 'Sour, thin body, slow 46s shot'":activeMethod==="aeropress"?"e.g. 'Muddy, over-extracted...'":"e.g. 'Flat, no clarity...'"}
+                      value={diagInput} onChange={e=>setDiagInput(e.target.value)}/>
                     <div className="fa" style={{marginBottom:14}}>
                       <button className="btn ai" disabled={aiLoading||(!diagInput.trim()&&!compassSelected)} onClick={runDiagnosis}>{aiLoading?"Diagnosing...":"Diagnose"}</button>
-                      {(aiResult||diagInput) && <button className="btn sm" onClick={() => { setAiResult(""); setDiagInput(""); setCompassSelected(null); setShotTime(""); setShotYield(""); }}>Clear</button>}
+                      {(aiResult||diagInput||compassSelected) && <button className="btn sm" onClick={() => { setAiResult(""); setDiagInput(""); setCompassSelected(null); setShotTime(""); setShotYield(""); }}>Clear</button>}
                     </div>
                     <AiSection/>
                   </>
@@ -1139,64 +1236,72 @@ function App() {
 
                 {/* EDIT TAB */}
                 {editing && beanDraft && (() => {
-                  const m = beanDraft.methods?.[activeMethod] || defaultParams[activeMethod];
-                  const u = f => v => updateDraftMethod(f, v);
+                  const m = beanDraft.methods?.[activeMethod]||defaultParams[activeMethod];
+                  const u = f => v => updateDraftMethod(f,v);
                   return (
                     <>
                       <div className="sec-lbl" style={{marginBottom:10}}>Bean Info</div>
                       <div className="fg" style={{marginBottom:14}}>
-                        <Field label="Roaster" value={beanDraft.roaster} onChange={v => setBeanDraft(d=>({...d,roaster:v}))} />
-                        <Field label="Bean Name" value={beanDraft.name} onChange={v => setBeanDraft(d=>({...d,name:v}))} />
-                        <Field label="Origin" value={beanDraft.origin} onChange={v => setBeanDraft(d=>({...d,origin:v}))} />
-                        <div className="field"><label>Process</label><select className="sel-input" value={beanDraft.process} onChange={e => setBeanDraft(d=>({...d,process:e.target.value}))}>{PROCESS_OPTS.map(o=><option key={o} value={o}>{o}</option>)}</select></div>
-                        <div className="field"><label>Roast Level</label><select className="sel-input" value={beanDraft.roast} onChange={e => setBeanDraft(d=>({...d,roast:e.target.value}))}>{ROAST_OPTS.map(o=><option key={o} value={o}>{o}</option>)}</select></div>
-                        <Field label="Roast Date" value={beanDraft.roastDate||""} onChange={v => setBeanDraft(d=>({...d,roastDate:v}))} placeholder="YYYY-MM-DD" />
-                        <Field label="Altitude" value={beanDraft.altitude||""} onChange={v => setBeanDraft(d=>({...d,altitude:v}))} />
-                        <div className="field full"><Field label="Varietal" value={beanDraft.varietal||""} onChange={v => setBeanDraft(d=>({...d,varietal:v}))} /></div>
-                        <div className="field full"><Field label="Flavor Profile" value={beanDraft.flavorProfile||""} onChange={v => setBeanDraft(d=>({...d,flavorProfile:v}))} /></div>
-                        <div className="field full"><Field label="Bag Image URL" value={beanDraft.imageUrl||""} onChange={v => setBeanDraft(d=>({...d,imageUrl:v}))} placeholder="https://..." /></div>
+                        <Field label="Roaster" value={beanDraft.roaster} onChange={v=>setBeanDraft(d=>({...d,roaster:v}))}/>
+                        <Field label="Bean Name" value={beanDraft.name} onChange={v=>setBeanDraft(d=>({...d,name:v}))}/>
+                        <Field label="Origin" value={beanDraft.origin} onChange={v=>setBeanDraft(d=>({...d,origin:v}))}/>
+                        <div className="field"><label>Process</label><select className="sel-input" value={beanDraft.process} onChange={e=>setBeanDraft(d=>({...d,process:e.target.value}))}>{PROCESS_OPTS.map(o=><option key={o} value={o}>{o}</option>)}</select></div>
+                        <div className="field"><label>Roast Level</label><select className="sel-input" value={beanDraft.roast} onChange={e=>setBeanDraft(d=>({...d,roast:e.target.value}))}>{ROAST_OPTS.map(o=><option key={o} value={o}>{o}</option>)}</select></div>
+                        <Field label="Roast Date" value={beanDraft.roastDate||""} onChange={v=>setBeanDraft(d=>({...d,roastDate:v}))} placeholder="YYYY-MM-DD"/>
+                        <Field label="Altitude" value={beanDraft.altitude||""} onChange={v=>setBeanDraft(d=>({...d,altitude:v}))}/>
+                        <div className="field full"><Field label="Varietal" value={beanDraft.varietal||""} onChange={v=>setBeanDraft(d=>({...d,varietal:v}))}/></div>
+                        <div className="field full"><Field label="Flavor Profile" value={beanDraft.flavorProfile||""} onChange={v=>setBeanDraft(d=>({...d,flavorProfile:v}))}/></div>
                       </div>
+                      <div className="sec-lbl" style={{marginBottom:8}}>Bag Image</div>
+                      {draftImageUrl && <img src={draftImageUrl} alt="bag" className="photo-preview"/>}
+                      <div className="url-row">
+                        <input placeholder="Image URL..." value={beanDraft.imageUrl||""} onChange={e=>setBeanDraft(d=>({...d,imageUrl:e.target.value,imageBase64:""}))}/>
+                      </div>
+                      <label className="photo-upload-wrap">
+                        <div style={{fontSize:11,color:"var(--muted)"}}>📷 Upload photo from camera roll</div>
+                        <input type="file" accept="image/*" style={{display:"none"}} onChange={e=>handlePhotoUpload(e,true)}/>
+                      </label>
+                      <div className="div"/>
                       <div className="sec-lbl" style={{marginBottom:10}}>{METHOD_LABELS[activeMethod]} Parameters</div>
                       {activeMethod==="espresso" && (
                         <div className="fg">
-                          <Select label="Dose" value={m.dose} onChange={u("dose")} options={DOSES_ESP} />
-                          <Select label="Yield" value={m.yield} onChange={u("yield")} options={YIELD_OPTS} />
-                          <Select label="Time" value={m.time} onChange={u("time")} options={TIME_OPTS} />
-                          <Select label="Temp" value={m.temp} onChange={u("temp")} options={TEMPS} />
-                          <div className="field full"><Field label="Pre-brew" value={m.preBrew} onChange={u("preBrew")} /></div>
-                          <div className="field full"><Field label="Tasting Notes" value={m.notes} onChange={u("notes")} multiline /></div>
-                          <div className="field full"><Field label="What Worked" value={m.whatWorked} onChange={u("whatWorked")} multiline /></div>
-                          <div className="field full"><Field label="What Didn't" value={m.whatDidnt} onChange={u("whatDidnt")} multiline /></div>
-                          <div className="field full"><Field label="Iced Notes" value={m.iced} onChange={u("iced")} multiline /></div>
+                          <Select label="Dose" value={m.dose} onChange={u("dose")} options={DOSES_ESP}/>
+                          <Select label="Yield" value={m.yield} onChange={u("yield")} options={YIELD_OPTS}/>
+                          <Select label="Time" value={m.time} onChange={u("time")} options={TIME_OPTS}/>
+                          <Select label="Temp" value={m.temp} onChange={u("temp")} options={TEMPS}/>
+                          <div className="field full"><Field label="Pre-brew" value={m.preBrew} onChange={u("preBrew")}/></div>
+                          <div className="field full"><Field label="Tasting Notes" value={m.notes} onChange={u("notes")} multiline/></div>
+                          <div className="field full"><Field label="What Worked" value={m.whatWorked} onChange={u("whatWorked")} multiline/></div>
+                          <div className="field full"><Field label="What Didn't" value={m.whatDidnt} onChange={u("whatDidnt")} multiline/></div>
+                          <div className="field full"><Field label="Iced Notes" value={m.iced} onChange={u("iced")} multiline/></div>
                         </div>
                       )}
                       {activeMethod==="aeropress" && (
                         <div className="fg">
-                          <Select label="Dose" value={m.dose} onChange={u("dose")} options={DOSES_MAN} />
-                          <Select label="Water" value={m.water} onChange={u("water")} options={WATER_OPTS} />
-                          <Select label="Temp" value={m.temp} onChange={u("temp")} options={TEMPS} />
-                          <Select label="Steep Time" value={m.steepTime} onChange={u("steepTime")} options={STEEP_OPTS} />
-                          <Select label="Press Time" value={m.pressTime} onChange={u("pressTime")} options={["20","25","30","35","40","45","60"].map(v=>({value:v,label:v+"s"}))} />
-                          <Toggle label="Inverted?" value={m.inverted} onChange={u("inverted")} />
-                          <Toggle label="Bloom?" value={m.bloom} onChange={u("bloom")} />
-                          {m.bloom && <Select label="Bloom Time" value={m.bloomTime} onChange={u("bloomTime")} options={BLOOM_T} />}
-                          <div className="field full"><Field label="Tasting Notes" value={m.notes} onChange={u("notes")} multiline /></div>
-                          <div className="field full"><Field label="What Worked" value={m.whatWorked} onChange={u("whatWorked")} multiline /></div>
-                          <div className="field full"><Field label="What Didn't" value={m.whatDidnt} onChange={u("whatDidnt")} multiline /></div>
+                          <Select label="Dose" value={m.dose} onChange={u("dose")} options={DOSES_MAN}/>
+                          <Select label="Water" value={m.water} onChange={u("water")} options={WATER_OPTS}/>
+                          <Select label="Temp" value={m.temp} onChange={u("temp")} options={TEMPS}/>
+                          <Select label="Steep Time" value={m.steepTime} onChange={u("steepTime")} options={STEEP_OPTS}/>
+                          <Select label="Press Time" value={m.pressTime} onChange={u("pressTime")} options={["20","25","30","35","40","45","60"].map(v=>({value:v,label:v+"s"}))}/>
+                          <Toggle label="Inverted?" value={m.inverted} onChange={u("inverted")}/>
+                          <Toggle label="Bloom?" value={m.bloom} onChange={u("bloom")}/>
+                          {m.bloom && <Select label="Bloom Time" value={m.bloomTime} onChange={u("bloomTime")} options={BLOOM_T}/>}
+                          <div className="field full"><Field label="Tasting Notes" value={m.notes} onChange={u("notes")} multiline/></div>
+                          <div className="field full"><Field label="What Worked" value={m.whatWorked} onChange={u("whatWorked")} multiline/></div>
+                          <div className="field full"><Field label="What Didn't" value={m.whatDidnt} onChange={u("whatDidnt")} multiline/></div>
                         </div>
                       )}
                       {activeMethod==="pourover" && (
                         <div className="fg">
-                          <Select label="Dose" value={m.dose} onChange={u("dose")} options={DOSES_MAN} />
-                          <Select label="Water" value={m.water} onChange={u("water")} options={WATER_OPTS} />
-                          <Select label="Temp" value={m.temp} onChange={u("temp")} options={TEMPS} />
-                          <Select label="Bloom Amount" value={m.bloomAmount} onChange={u("bloomAmount")} options={["20","30","40","50","60"].map(v=>({value:v,label:v+"g"}))} />
-                          <Select label="Bloom Time" value={m.bloomTime} onChange={u("bloomTime")} options={BLOOM_T} />
-                          <Field label="Total Time" value={m.totalTime} onChange={u("totalTime")} placeholder="e.g. 3:30" />
-                          <div className="field full"><Field label="Pour Sequence (one per line with timing)" value={m.pours} onChange={u("pours")} multiline /></div>
-                          <div className="field full"><Field label="Tasting Notes" value={m.notes} onChange={u("notes")} multiline /></div>
-                          <div className="field full"><Field label="What Worked" value={m.whatWorked} onChange={u("whatWorked")} multiline /></div>
-                          <div className="field full"><Field label="What Didn't" value={m.whatDidnt} onChange={u("whatDidnt")} multiline /></div>
+                          <Select label="Dose" value={m.dose} onChange={u("dose")} options={DOSES_MAN}/>
+                          <Select label="Water" value={m.water} onChange={u("water")} options={WATER_OPTS}/>
+                          <Select label="Temp" value={m.temp} onChange={u("temp")} options={TEMPS}/>
+                          <Select label="Bloom Amount" value={m.bloomAmount} onChange={u("bloomAmount")} options={["20","30","40","50","60"].map(v=>({value:v,label:v+"g"}))}/>
+                          <Select label="Bloom Time" value={m.bloomTime} onChange={u("bloomTime")} options={BLOOM_T}/>
+                          <Field label="Total Time" value={m.totalTime} onChange={u("totalTime")} placeholder="e.g. 3:30"/>
+                          <div className="field full"><Field label="Tasting Notes" value={m.notes} onChange={u("notes")} multiline/></div>
+                          <div className="field full"><Field label="What Worked" value={m.whatWorked} onChange={u("whatWorked")} multiline/></div>
+                          <div className="field full"><Field label="What Didn't" value={m.whatDidnt} onChange={u("whatDidnt")} multiline/></div>
                         </div>
                       )}
                       <div className="fa">
@@ -1212,7 +1317,7 @@ function App() {
         </div>
       </div>
 
-      {showTimer && <Timer stages={timerStages} onClose={() => setShowTimer(false)} />}
+      {showTimer && <Timer stages={timerStages} onClose={() => setShowTimer(false)}/>}
 
       {showApiModal && (
         <div className="modal-overlay" onClick={() => setShowApiModal(false)}>
@@ -1223,14 +1328,14 @@ function App() {
             {window._COFFEE_API_KEY
               ? <p style={{color:"var(--green)",marginBottom:8,fontSize:11}}>✓ Key active: {window._COFFEE_API_KEY.slice(0,14)}...</p>
               : <p style={{color:"var(--red)",marginBottom:8,fontSize:11}}>✗ No key saved</p>}
-            <input type="text" placeholder="sk-ant-api03-..." value={apiKeyInput} onChange={e => setApiKeyInput(e.target.value)} onKeyDown={e => e.key==="Enter" && saveApiKey()} />
+            <input type="text" placeholder="sk-ant-api03-..." value={apiKeyInput} onChange={e=>setApiKeyInput(e.target.value)} onKeyDown={e=>e.key==="Enter"&&saveApiKey()}/>
             <div className="fa" style={{marginBottom:12}}>
               <button className="btn p" onClick={saveApiKey}>Save Key</button>
               <button className="btn" onClick={() => setShowApiModal(false)}>Cancel</button>
             </div>
             <div style={{borderTop:"1px solid var(--border)",paddingTop:12}}>
               <button className="btn ai" style={{width:"100%"}} onClick={async () => {
-                window._COFFEE_API_KEY = apiKeyInput.trim() || window._COFFEE_API_KEY;
+                window._COFFEE_API_KEY = apiKeyInput.trim()||window._COFFEE_API_KEY;
                 const r = await callClaude("You are a helpful assistant.","Say only: API key working!");
                 alert(r);
               }}>Test Connection</button>
