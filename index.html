@@ -50,14 +50,29 @@ async function supabaseLoad() {
   try {
     const res = await fetch(SUPABASE_URL + "/rest/v1/beans?id=eq." + SUPABASE_ROW_ID + "&select=data", {
       headers: {
-        "apikey": SUPABASE_KEY
+        "apikey": SUPABASE_KEY,
+        "Accept": "application/json"
       }
     });
-    if (!res.ok) return null;
-    const rows = await res.json();
-    if (rows && rows.length > 0) return rows[0].data;
+    if (!res.ok) {
+      console.error("Supabase load failed:", res.status, await res.text());
+      return null;
+    }
+    const text = await res.text();
+    console.log("Supabase raw response:", text.slice(0, 200));
+    const rows = JSON.parse(text);
+    if (rows && Array.isArray(rows) && rows.length > 0 && rows[0].data) {
+      const d = rows[0].data;
+      // Handle both array and string cases
+      if (Array.isArray(d)) return d;
+      if (typeof d === "string") return JSON.parse(d);
+      return d;
+    }
     return null;
-  } catch(e) { return null; }
+  } catch(e) {
+    console.error("Supabase load error:", e);
+    return null;
+  }
 }
 const LEGACY_KEYS = ["coffeeLog_v5","coffeeLog_v4","coffeeLog_v3","coffeeLog_beans_v3"];
 
