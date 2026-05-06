@@ -27,6 +27,40 @@ const GRIND_MAX = 12;
 const METHODS = ["espresso", "aeropress", "pourover"];
 const METHOD_LABELS = { espresso: "Espresso", aeropress: "AeroPress", pourover: "Pour Over" };
 const STORAGE_KEY = "coffeeLog_v6";
+const SUPABASE_URL = "https://pjgbmnfdsvxsdvimagiy.supabase.co";
+const SUPABASE_KEY = "sb_publishable_irJT3AiJwcYZ2ceI5A6Rfw_5AdNz85w";
+const SUPABASE_ROW_ID = "user_beans";
+
+async function supabaseSave(beans) {
+  try {
+    const res = await fetch(SUPABASE_URL + "/rest/v1/beans", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "apikey": SUPABASE_KEY,
+        "Authorization": "Bearer " + SUPABASE_KEY,
+        "Prefer": "resolution=merge-duplicates"
+      },
+      body: JSON.stringify({ id: SUPABASE_ROW_ID, data: beans, updated_at: new Date().toISOString() })
+    });
+    return res.ok;
+  } catch(e) { return false; }
+}
+
+async function supabaseLoad() {
+  try {
+    const res = await fetch(SUPABASE_URL + "/rest/v1/beans?id=eq." + SUPABASE_ROW_ID + "&select=data", {
+      headers: {
+        "apikey": SUPABASE_KEY,
+        "Authorization": "Bearer " + SUPABASE_KEY
+      }
+    });
+    if (!res.ok) return null;
+    const rows = await res.json();
+    if (rows && rows.length > 0) return rows[0].data;
+    return null;
+  } catch(e) { return null; }
+}
 const LEGACY_KEYS = ["coffeeLog_v5","coffeeLog_v4","coffeeLog_v3","coffeeLog_beans_v3"];
 
 const defaultParams = {
@@ -87,7 +121,10 @@ function loadBeans() {
   } catch(e) {}
   return [];
 }
-function saveBeans(b) { try { localStorage.setItem(STORAGE_KEY, JSON.stringify(b)); } catch {} }
+function saveBeans(b) {
+  try { localStorage.setItem(STORAGE_KEY, JSON.stringify(b)); } catch {}
+  supabaseSave(b);
+}
 
 // ── GRIND SELECTOR ──
 function GrindSelector({ value, onChange }) {
@@ -404,6 +441,7 @@ function App() {
   const [urlImport, setUrlImport] = useState(null);
   const [compassSelected, setCompassSelected] = useState(null);
   const [activeRecipeIdx, setActiveRecipeIdx] = useState(null);
+  const [syncStatus, setSyncStatus] = useState("syncing");
 
   useEffect(() => {
     const check = () => setIsMobile(window.innerWidth < 680);
@@ -412,6 +450,18 @@ function App() {
   }, []);
   useEffect(() => { saveBeans(beans); }, [beans]);
   useEffect(() => { try { const k = localStorage.getItem("coffeeLog_apikey"); if (k) window._COFFEE_API_KEY = k; } catch {} }, []);
+  useEffect(() => {
+    supabaseLoad().then(cloudBeans => {
+      if (cloudBeans && Array.isArray(cloudBeans) && cloudBeans.length > 0) {
+        const migrated = cloudBeans.map(migrateLegacyBean);
+        setBeans(migrated);
+        try { localStorage.setItem(STORAGE_KEY, JSON.stringify(migrated)); } catch {}
+        setSyncStatus("synced");
+      } else {
+        setSyncStatus("local");
+      }
+    }).catch(() => setSyncStatus("local"));
+  }, []);
 
   const current = beans.find(b => b.id === selectedId);
   const latestGrind = current?.grindLogs?.[activeMethod]?.slice(-1)[0] || null;
@@ -421,7 +471,13 @@ function App() {
   const aiResult = aiResults[aiKey] || "";
   const setAiResult = (val) => setAiResults(prev => ({ ...prev, [aiKey]: val }));
 
-  const upd = fn => setBeans(prev => { const next = fn(prev); saveBeans(next); return next; });
+  const upd = fn => setBeans(prev => {
+    const next = fn(prev);
+    saveBeans(next);
+    setSyncStatus("syncing");
+    supabaseSave(next).then(ok => setSyncStatus(ok ? "synced" : "local"));
+    return next;
+  });
 
   const selectBean = id => {
     setSelectedId(id); setShowList(false); setEditing(false); setAdding(false);
@@ -896,7 +952,9 @@ function App() {
       <div className="hdr">
         <div className="hdr-l">
           {isMobile && !showList && <button className="back" onClick={() => { setShowList(true); setEditing(false); setAdding(false); }}>‹</button>}
-          <div className="hdr-brand"><h1>Coffee Log</h1><p>Micra · E64S · V60 · AeroPress</p></div>
+          <div className="hdr-brand"><h1>Coffee Log</h1>
+            <p>{"Micra · E64S · V60" + (syncStatus==="syncing" ? " · ☁..." : syncStatus==="synced" ? " · ☁ ✓" : " · ☁ offline")}</p>
+          </div>
         </div>
         <div className="hdr-r">
           <button className="btn sm" onClick={exportText}>{copied ? "✓" : "Export"}</button>
