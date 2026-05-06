@@ -121,7 +121,6 @@ function loadBeans() {
 }
 function saveBeans(b) {
   try { localStorage.setItem(STORAGE_KEY, JSON.stringify(b)); } catch {}
-  supabaseSave(b);
 }
 
 // ── GRIND SELECTOR ──
@@ -449,16 +448,29 @@ function App() {
   useEffect(() => { saveBeans(beans); }, [beans]);
   useEffect(() => { try { const k = localStorage.getItem("coffeeLog_apikey"); if (k) window._COFFEE_API_KEY = k; } catch {} }, []);
   useEffect(() => {
-    supabaseLoad().then(cloudBeans => {
-      if (cloudBeans && Array.isArray(cloudBeans) && cloudBeans.length > 0) {
-        const migrated = cloudBeans.map(migrateLegacyBean);
-        setBeans(migrated);
-        try { localStorage.setItem(STORAGE_KEY, JSON.stringify(migrated)); } catch {}
-        setSyncStatus("synced");
-      } else {
-        setSyncStatus("local");
-      }
-    }).catch(() => setSyncStatus("local"));
+    setSyncStatus("syncing");
+    // Always try to load from Supabase first, with a timeout fallback
+    const timeout = new Promise((_, reject) => setTimeout(() => reject(new Error("timeout")), 8000));
+    Promise.race([supabaseLoad(), timeout])
+      .then(cloudBeans => {
+        if (cloudBeans && Array.isArray(cloudBeans) && cloudBeans.length > 0) {
+          const migrated = cloudBeans.map(migrateLegacyBean);
+          setBeans(migrated);
+          try { localStorage.setItem(STORAGE_KEY, JSON.stringify(migrated)); } catch {}
+          setSyncStatus("synced");
+        } else {
+          // Supabase returned empty — push local data up to cloud
+          const local = loadBeans();
+          if (local && local.length > 0) {
+            supabaseSave(local).then(ok => setSyncStatus(ok ? "synced" : "local"));
+          } else {
+            setSyncStatus("local");
+          }
+        }
+      })
+      .catch(() => {
+        setSyncStatus("offline");
+      });
   }, []);
 
   const current = beans.find(b => b.id === selectedId);
@@ -471,9 +483,25 @@ function App() {
 
   const upd = fn => setBeans(prev => {
     const next = fn(prev);
-    saveBeans(next);
+    // Save to localStorage immediately
+    try { localStorage.setItem(STORAGE_KEY, JSON.stringify(next)); } catch {}
+    // Save to Supabase with retry
     setSyncStatus("syncing");
-    supabaseSave(next).then(ok => setSyncStatus(ok ? "synced" : "local"));
+    const trySave = (attempts) => {
+      supabaseSave(next).then(ok => {
+        if (ok) {
+          setSyncStatus("synced");
+        } else if (attempts > 0) {
+          setTimeout(() => trySave(attempts - 1), 2000);
+        } else {
+          setSyncStatus("offline");
+        }
+      }).catch(() => {
+        if (attempts > 0) setTimeout(() => trySave(attempts - 1), 2000);
+        else setSyncStatus("offline");
+      });
+    };
+    trySave(3);
     return next;
   });
 
