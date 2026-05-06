@@ -88,7 +88,7 @@ function loadBeans() {
   } catch(e) {}
   return [];
 }
-function saveBeans(b) { try { localStorage.setItem(STORAGE_KEY, JSON.stringify(b)); } catch(e) {} } catch(e) {} } catch {}
+function saveBeans(b) { try { localStorage.setItem(STORAGE_KEY, JSON.stringify(b)); } catch(e) {} } catch {}
 }
 
 // ── GRIND SELECTOR ──
@@ -414,31 +414,6 @@ function App() {
   }, []);
   useEffect(() => { saveBeans(beans); }, [beans]);
   useEffect(() => { try { const k = localStorage.getItem("coffeeLog_apikey"); if (k) window._COFFEE_API_KEY = k; } catch {} }, []);
-  useEffect(() => {
-    setSyncStatus("syncing");
-    // Always try to load from Supabase first, with a timeout fallback
-    const timeout = new Promise((_, reject) => setTimeout(() => reject(new Error("timeout")), 8000));
-    Promise.race([supabaseLoad(), timeout])
-      .then(cloudBeans => {
-        if (cloudBeans && Array.isArray(cloudBeans) && cloudBeans.length > 0) {
-          const migrated = cloudBeans.map(migrateLegacyBean);
-          setBeans(migrated);
-          try { localStorage.setItem(STORAGE_KEY, JSON.stringify(migrated)); } catch {}
-          setSyncStatus("synced");
-        } else {
-          // Supabase returned empty — push local data up to cloud
-          const local = loadBeans();
-          if (local && local.length > 0) {
-            supabaseSave(local).then(ok => setSyncStatus(ok ? "synced" : "local"));
-          } else {
-            setSyncStatus("local");
-          }
-        }
-      })
-      .catch(() => {
-        setSyncStatus("offline");
-      });
-  }, []);
 
   const current = beans.find(b => b.id === selectedId);
   const latestGrind = current?.grindLogs?.[activeMethod]?.slice(-1)[0] || null;
@@ -448,11 +423,7 @@ function App() {
   const aiResult = aiResults[aiKey] || "";
   const setAiResult = (val) => setAiResults(prev => ({ ...prev, [aiKey]: val }));
 
-  const upd = fn => setBeans(prev => {
-    const next = fn(prev);
-    saveBeans(next);
-    return next;
-  });
+  const upd = fn => setBeans(prev => { const next = fn(prev); saveBeans(next); return next; });
 
   const selectBean = id => {
     setSelectedId(id); setShowList(false); setEditing(false); setAdding(false);
@@ -946,11 +917,10 @@ function App() {
           </div>
           <div className="list-scroll">
             {beans.length === 0 && <div className="empty">No beans yet — add your first</div>}
-            {[...beans].sort((a, b) => {
-              const aOut = a.inStock === false;
-              const bOut = b.inStock === false;
-              if (aOut !== bOut) return aOut ? 1 : -1;
-              return (b.rating || 0) - (a.rating || 0);
+            {[...beans].sort((a,b) => {
+              const aOut = a.inStock===false, bOut = b.inStock===false;
+              if (aOut!==bOut) return aOut?1:-1;
+              return (b.rating||0)-(a.rating||0);
             }).map(b => {
               const eg = b.grindLogs?.espresso?.slice(-1)[0];
               const da = daysAgo(b.roastDate);
