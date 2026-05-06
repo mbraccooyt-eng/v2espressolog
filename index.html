@@ -8,6 +8,7 @@
   <title>Coffee Log</title>
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link href="https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,400;0,700;1,400&family=DM+Mono:wght@300;400;500&display=swap" rel="stylesheet" />
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.2/babel.min.js"></script>
@@ -30,48 +31,39 @@ const STORAGE_KEY = "coffeeLog_v6";
 const SUPABASE_URL = "https://pjgbmnfdsvxsdvimagiy.supabase.co";
 const SUPABASE_KEY = "sb_publishable_irJT3AiJwcYZ2ceI5A6Rfw_5AdNz85w";
 const SUPABASE_ROW_ID = "user_beans";
+const db = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
 
 async function supabaseSave(beans) {
   try {
-    const res = await fetch(SUPABASE_URL + "/rest/v1/beans", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "apikey": SUPABASE_KEY,
-        "Prefer": "resolution=merge-duplicates"
-      },
-      body: JSON.stringify({ id: SUPABASE_ROW_ID, data: beans, updated_at: new Date().toISOString() })
+    const { error } = await db.from("beans").upsert({ 
+      id: SUPABASE_ROW_ID, 
+      data: beans, 
+      updated_at: new Date().toISOString() 
     });
-    return res.ok;
-  } catch(e) { return false; }
+    return !error;
+  } catch(e) { 
+    console.error("Save error:", e);
+    return false; 
+  }
 }
 
 async function supabaseLoad() {
   try {
-    const res = await fetch(SUPABASE_URL + "/rest/v1/beans?id=eq." + SUPABASE_ROW_ID + "&select=data", {
-      headers: {
-        "apikey": SUPABASE_KEY,
-        "Accept": "application/json"
-      }
-    });
-    if (!res.ok) {
-      console.error("Supabase load failed:", res.status, await res.text());
+    const { data, error } = await db.from("beans").select("data").eq("id", SUPABASE_ROW_ID).single();
+    if (error) {
+      console.error("Load error:", error);
       return null;
     }
-    const text = await res.text();
-    console.log("Supabase raw response:", text.slice(0, 200));
-    const rows = JSON.parse(text);
-    if (rows && Array.isArray(rows) && rows.length > 0 && rows[0].data) {
-      const d = rows[0].data;
-      // Handle both array and string cases
+    if (data && data.data) {
+      const d = data.data;
       if (Array.isArray(d)) return d;
       if (typeof d === "string") return JSON.parse(d);
       return d;
     }
     return null;
-  } catch(e) {
-    console.error("Supabase load error:", e);
-    return null;
+  } catch(e) { 
+    console.error("Load exception:", e);
+    return null; 
   }
 }
 const LEGACY_KEYS = ["coffeeLog_v5","coffeeLog_v4","coffeeLog_v3","coffeeLog_beans_v3"];
