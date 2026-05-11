@@ -559,72 +559,6 @@ function App(){
     {m.whatDidnt&&<div className="sec"><div className="sec-lbl">What Didn't</div><div className="sec-txt" style={{color:"var(--red)"}}>{m.whatDidnt}</div></div>}
   </>;
 
-  const EditForm=()=>{
-    const m=draft?.methods?.[method]||DEF[method];
-    const u=f=>v=>updDraftM(f,v);
-    return<>
-      <div className="sec-lbl" style={{marginBottom:10}}>Bean Info</div>
-      <div className="fg" style={{marginBottom:14}}>
-        <Field label="Roaster" value={draft.roaster} onChange={v=>setDraft(d=>({...d,roaster:v}))}/>
-        <Field label="Bean Name" value={draft.name} onChange={v=>setDraft(d=>({...d,name:v}))}/>
-        <Field label="Origin" value={draft.origin} onChange={v=>setDraft(d=>({...d,origin:v}))}/>
-        <div className="field"><label>Process</label><select className="sel-input" value={draft.process} onChange={e=>setDraft(d=>({...d,process:e.target.value}))}>{PROCESS_OPTS.map(o=><option key={o} value={o}>{o}</option>)}</select></div>
-        <div className="field"><label>Roast Level</label><select className="sel-input" value={draft.roast} onChange={e=>setDraft(d=>({...d,roast:e.target.value}))}>{ROAST_OPTS.map(o=><option key={o} value={o}>{o}</option>)}</select></div>
-        <Field label="Roast Date" value={draft.roastDate||""} onChange={v=>setDraft(d=>({...d,roastDate:v}))} placeholder="YYYY-MM-DD"/>
-        <Field label="Altitude" value={draft.altitude||""} onChange={v=>setDraft(d=>({...d,altitude:v}))}/>
-        <div className="field full"><Field label="Varietal" value={draft.varietal||""} onChange={v=>setDraft(d=>({...d,varietal:v}))}/></div>
-        <div className="field full"><Field label="Flavor Profile" value={draft.flavorProfile||""} onChange={v=>setDraft(d=>({...d,flavorProfile:v}))}/></div>
-      </div>
-      <div className="sec-lbl" style={{marginBottom:8}}>Bag Image</div>
-      {draftImg&&<img src={draftImg} alt="bag" style={{width:"100%",maxHeight:100,objectFit:"cover",marginBottom:8,borderRadius:2}}/>}
-      <div style={{display:"flex",gap:8,marginBottom:10}}>
-        <input style={{flex:1,background:"var(--bg3)",border:"1px solid var(--border)",color:"var(--text)",fontFamily:"'DM Mono',monospace",fontSize:14,padding:"9px 11px",outline:"none",WebkitAppearance:"none",borderRadius:0}} placeholder="Image URL..." value={draft.imageUrl||""} onChange={e=>setDraft(d=>({...d,imageUrl:e.target.value,imageBase64:""}))}/>
-      </div>
-      <div style={{fontSize:10,color:"var(--muted)",lineHeight:1.6,marginBottom:12}}>Paste image URL from roaster website above for a persistent photo.</div>
-      <div className="div"/>
-      <div className="sec-lbl" style={{marginBottom:10}}>{METHOD_LABELS[method]} Parameters</div>
-      {method==="espresso"&&<div className="fg">
-        <Sel label="Dose" value={m.dose} onChange={u("dose")} options={DOSES_ESP}/>
-        <Sel label="Yield" value={m.yield} onChange={u("yield")} options={YIELD_OPTS}/>
-        <Sel label="Time" value={m.time} onChange={u("time")} options={TIME_OPTS}/>
-        <Sel label="Temp" value={m.temp} onChange={u("temp")} options={TEMPS}/>
-        <div className="field full"><Field label="Pre-brew" value={m.preBrew} onChange={u("preBrew")}/></div>
-        <div className="field full"><Field label="Tasting Notes" value={m.notes} onChange={u("notes")} multiline/></div>
-        <div className="field full"><Field label="What Worked" value={m.whatWorked} onChange={u("whatWorked")} multiline/></div>
-        <div className="field full"><Field label="What Didn't" value={m.whatDidnt} onChange={u("whatDidnt")} multiline/></div>
-        <div className="field full"><Field label="Iced Notes" value={m.iced} onChange={u("iced")} multiline/></div>
-      </div>}
-      {method==="aeropress"&&<div className="fg">
-        <Sel label="Dose" value={m.dose} onChange={u("dose")} options={DOSES_MAN}/>
-        <Sel label="Water" value={m.water} onChange={u("water")} options={WATER_OPTS}/>
-        <Sel label="Temp" value={m.temp} onChange={u("temp")} options={TEMPS}/>
-        <Sel label="Steep Time" value={m.steepTime} onChange={u("steepTime")} options={STEEP_OPTS}/>
-        <Sel label="Press Time" value={m.pressTime} onChange={u("pressTime")} options={["20","25","30","35","40","45","60"].map(v=>({value:v,label:v+"s"}))}/>
-        <Toggle label="Inverted?" value={m.inverted} onChange={u("inverted")}/>
-        <Toggle label="Bloom?" value={m.bloom} onChange={u("bloom")}/>
-        {m.bloom&&<Sel label="Bloom Time" value={m.bloomTime} onChange={u("bloomTime")} options={BLOOM_T}/>}
-        <div className="field full"><Field label="Tasting Notes" value={m.notes} onChange={u("notes")} multiline/></div>
-        <div className="field full"><Field label="What Worked" value={m.whatWorked} onChange={u("whatWorked")} multiline/></div>
-        <div className="field full"><Field label="What Didn't" value={m.whatDidnt} onChange={u("whatDidnt")} multiline/></div>
-      </div>}
-      {method==="pourover"&&<div className="fg">
-        <Sel label="Dose" value={m.dose} onChange={u("dose")} options={DOSES_MAN}/>
-        <Sel label="Water" value={m.water} onChange={u("water")} options={WATER_OPTS}/>
-        <Sel label="Temp" value={m.temp} onChange={u("temp")} options={TEMPS}/>
-        <Sel label="Bloom Amount" value={m.bloomAmount} onChange={u("bloomAmount")} options={["20","30","40","50","60"].map(v=>({value:v,label:v+"g"}))}/>
-        <Sel label="Bloom Time" value={m.bloomTime} onChange={u("bloomTime")} options={BLOOM_T}/>
-        <Field label="Total Time" value={m.totalTime} onChange={u("totalTime")} placeholder="e.g. 3:30"/>
-        <div className="field full"><Field label="Tasting Notes" value={m.notes} onChange={u("notes")} multiline/></div>
-        <div className="field full"><Field label="What Worked" value={m.whatWorked} onChange={u("whatWorked")} multiline/></div>
-        <div className="field full"><Field label="What Didn't" value={m.whatDidnt} onChange={u("whatDidnt")} multiline/></div>
-      </div>}
-      <div className="fa">
-        <button className="btn p" onClick={adding?saveNew:saveEdit}>{adding?"Save Bean":"Save"}</button>
-        <button className="btn" onClick={()=>{if(adding){setAdding(false);setShowList(true);}else setEditing(false);}}>Cancel</button>
-      </div>
-    </>;
-  };
-
   return<div className="app">
     <style>{`
       @import url('https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,400;0,700;1,400&family=DM+Mono:wght@300;400;500&display=swap');
@@ -739,13 +673,13 @@ function App(){
       .ge-badge{font-size:7px;letter-spacing:1.5px;text-transform:uppercase;color:var(--green);border:1px solid #3a5a28;padding:2px 6px;margin-top:3px;display:inline-block;}
       .ga-form{background:var(--bg3);border:1px solid var(--border);padding:13px;margin-bottom:13px;}
       .empty-grind{padding:16px;text-align:center;color:#4a3a28;font-size:11px;border:1px dashed var(--border);margin-bottom:13px;}
-      .fg{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:13px;max-width:100%;}
+      .fg{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:10px;margin-bottom:13px;width:100%;}
       .field{display:flex;flex-direction:column;gap:4px;}
       .field label{font-size:7px;letter-spacing:2px;text-transform:uppercase;color:var(--muted);}
       .field input,.field textarea{background:var(--bg3);border:1px solid var(--border);color:var(--text);font-family:'DM Mono',monospace;font-size:16px;padding:9px 11px;outline:none;resize:vertical;-webkit-appearance:none;border-radius:0;width:100%;min-width:0;}
       .field input:focus,.field textarea:focus{border-color:var(--gold);}
       .field.full{grid-column:1/-1;}
-      .sel-input{background:var(--bg3);border:1px solid var(--border);color:var(--text);font-family:'DM Mono',monospace;font-size:16px;padding:9px 11px;outline:none;-webkit-appearance:none;border-radius:0;width:100%;min-width:0;max-width:100%;}
+      .sel-input{background:var(--bg3);border:1px solid var(--border);color:var(--text);font-family:'DM Mono',monospace;font-size:16px;padding:9px 11px;outline:none;-webkit-appearance:none;border-radius:0;width:100%;min-width:0;}
       .fa{display:flex;gap:8px;margin-top:8px;flex-wrap:wrap;}
       .toggle-btn{background:var(--bg3);border:1px solid var(--border);color:var(--muted);font-family:'DM Mono',monospace;font-size:13px;padding:8px 14px;cursor:pointer;text-align:left;border-radius:0;}
       .toggle-btn.on{border-color:var(--gold);color:var(--gold);background:#2a1e0a;}
@@ -1034,7 +968,67 @@ function App(){
               <BeanInfo bean={cur}/>
             </>}
 
-            {editing&&draft&&<EditForm key="ef"/>}
+            {editing&&draft&&<React.Fragment>
+      <div className="sec-lbl" style={{marginBottom:10}}>Bean Info</div>
+      <div className="fg" style={{marginBottom:14}}>
+        <Field label="Roaster" value={draft.roaster} onChange={v=>setDraft(d=>({...d,roaster:v}))}/>
+        <Field label="Bean Name" value={draft.name} onChange={v=>setDraft(d=>({...d,name:v}))}/>
+        <Field label="Origin" value={draft.origin} onChange={v=>setDraft(d=>({...d,origin:v}))}/>
+        <div className="field"><label>Process</label><select className="sel-input" value={draft.process} onChange={e=>setDraft(d=>({...d,process:e.target.value}))}>{PROCESS_OPTS.map(o=><option key={o} value={o}>{o}</option>)}</select></div>
+        <div className="field"><label>Roast Level</label><select className="sel-input" value={draft.roast} onChange={e=>setDraft(d=>({...d,roast:e.target.value}))}>{ROAST_OPTS.map(o=><option key={o} value={o}>{o}</option>)}</select></div>
+        <Field label="Roast Date" value={draft.roastDate||""} onChange={v=>setDraft(d=>({...d,roastDate:v}))} placeholder="YYYY-MM-DD"/>
+        <Field label="Altitude" value={draft.altitude||""} onChange={v=>setDraft(d=>({...d,altitude:v}))}/>
+        <div className="field full"><Field label="Varietal" value={draft.varietal||""} onChange={v=>setDraft(d=>({...d,varietal:v}))}/></div>
+        <div className="field full"><Field label="Flavor Profile" value={draft.flavorProfile||""} onChange={v=>setDraft(d=>({...d,flavorProfile:v}))}/></div>
+      </div>
+      <div className="sec-lbl" style={{marginBottom:8}}>Bag Image</div>
+      {draftImg&&<img src={draftImg} alt="bag" style={{width:"100%",maxHeight:100,objectFit:"cover",marginBottom:8,borderRadius:2}}/>}
+      <div style={{display:"flex",gap:8,marginBottom:10}}>
+        <input style={{flex:1,background:"var(--bg3)",border:"1px solid var(--border)",color:"var(--text)",fontFamily:"'DM Mono',monospace",fontSize:14,padding:"9px 11px",outline:"none",WebkitAppearance:"none",borderRadius:0}} placeholder="Image URL..." value={draft.imageUrl||""} onChange={e=>setDraft(d=>({...d,imageUrl:e.target.value,imageBase64:""}))}/>
+      </div>
+      <div style={{fontSize:10,color:"var(--muted)",lineHeight:1.6,marginBottom:12}}>Paste image URL from roaster website above for a persistent photo.</div>
+      <div className="div"/>
+      <div className="sec-lbl" style={{marginBottom:10}}>{METHOD_LABELS[method]} Parameters</div>
+      {method==="espresso"&&<div className="fg">
+        <Sel label="Dose" value={m.dose} onChange={u("dose")} options={DOSES_ESP}/>
+        <Sel label="Yield" value={m.yield} onChange={u("yield")} options={YIELD_OPTS}/>
+        <Sel label="Time" value={m.time} onChange={u("time")} options={TIME_OPTS}/>
+        <Sel label="Temp" value={m.temp} onChange={u("temp")} options={TEMPS}/>
+        <div className="field full"><Field label="Pre-brew" value={m.preBrew} onChange={u("preBrew")}/></div>
+        <div className="field full"><Field label="Tasting Notes" value={m.notes} onChange={u("notes")} multiline/></div>
+        <div className="field full"><Field label="What Worked" value={m.whatWorked} onChange={u("whatWorked")} multiline/></div>
+        <div className="field full"><Field label="What Didn't" value={m.whatDidnt} onChange={u("whatDidnt")} multiline/></div>
+        <div className="field full"><Field label="Iced Notes" value={m.iced} onChange={u("iced")} multiline/></div>
+      </div>}
+      {method==="aeropress"&&<div className="fg">
+        <Sel label="Dose" value={m.dose} onChange={u("dose")} options={DOSES_MAN}/>
+        <Sel label="Water" value={m.water} onChange={u("water")} options={WATER_OPTS}/>
+        <Sel label="Temp" value={m.temp} onChange={u("temp")} options={TEMPS}/>
+        <Sel label="Steep Time" value={m.steepTime} onChange={u("steepTime")} options={STEEP_OPTS}/>
+        <Sel label="Press Time" value={m.pressTime} onChange={u("pressTime")} options={["20","25","30","35","40","45","60"].map(v=>({value:v,label:v+"s"}))}/>
+        <Toggle label="Inverted?" value={m.inverted} onChange={u("inverted")}/>
+        <Toggle label="Bloom?" value={m.bloom} onChange={u("bloom")}/>
+        {m.bloom&&<Sel label="Bloom Time" value={m.bloomTime} onChange={u("bloomTime")} options={BLOOM_T}/>}
+        <div className="field full"><Field label="Tasting Notes" value={m.notes} onChange={u("notes")} multiline/></div>
+        <div className="field full"><Field label="What Worked" value={m.whatWorked} onChange={u("whatWorked")} multiline/></div>
+        <div className="field full"><Field label="What Didn't" value={m.whatDidnt} onChange={u("whatDidnt")} multiline/></div>
+      </div>}
+      {method==="pourover"&&<div className="fg">
+        <Sel label="Dose" value={m.dose} onChange={u("dose")} options={DOSES_MAN}/>
+        <Sel label="Water" value={m.water} onChange={u("water")} options={WATER_OPTS}/>
+        <Sel label="Temp" value={m.temp} onChange={u("temp")} options={TEMPS}/>
+        <Sel label="Bloom Amount" value={m.bloomAmount} onChange={u("bloomAmount")} options={["20","30","40","50","60"].map(v=>({value:v,label:v+"g"}))}/>
+        <Sel label="Bloom Time" value={m.bloomTime} onChange={u("bloomTime")} options={BLOOM_T}/>
+        <Field label="Total Time" value={m.totalTime} onChange={u("totalTime")} placeholder="e.g. 3:30"/>
+        <div className="field full"><Field label="Tasting Notes" value={m.notes} onChange={u("notes")} multiline/></div>
+        <div className="field full"><Field label="What Worked" value={m.whatWorked} onChange={u("whatWorked")} multiline/></div>
+        <div className="field full"><Field label="What Didn't" value={m.whatDidnt} onChange={u("whatDidnt")} multiline/></div>
+      </div>}
+      <div className="fa">
+        <button className="btn p" onClick={adding?saveNew:saveEdit}>{adding?"Save Bean":"Save"}</button>
+        <button className="btn" onClick={()=>{if(adding){setAdding(false);setShowList(true);}else setEditing(false);}}>Cancel</button>
+      </div>
+</React.Fragment>}
           </div>
         </>}
       </div>
