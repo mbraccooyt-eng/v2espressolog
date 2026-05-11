@@ -799,7 +799,10 @@ function App(){
           {urlImport&&!urlImport.error&&<div style={{background:"#1a2818",border:"1px solid #3a5a28",padding:10,marginBottom:10,fontSize:11,color:"var(--green)",lineHeight:1.6}}>✓ {urlImport.name} by {urlImport.roaster}</div>}
           {urlImport?.error&&<div style={{color:"var(--red)",fontSize:11,marginBottom:10}}>{urlImport.error}</div>}
           <div className="div"/>
-          <React.Fragment>
+          (()=>{
+          const m=draft?.methods?.[method]||DEF[method];
+          const u=f=>v=>updDraftM(f,v);
+          return<>
       <div className="sec-lbl" style={{marginBottom:10}}>Bean Info</div>
       <div className="fg" style={{marginBottom:14}}>
         <Field label="Roaster" value={draft.roaster} onChange={v=>setDraft(d=>({...d,roaster:v}))}/>
@@ -859,7 +862,8 @@ function App(){
         <button className="btn p" onClick={adding?saveNew:saveEdit}>{adding?"Save Bean":"Save"}</button>
         <button className="btn" onClick={()=>{if(adding){setAdding(false);setShowList(true);}else setEditing(false);}}>Cancel</button>
       </div>
-</React.Fragment>
+</>
+          )()}
         </div>}
 
         {!adding&&!cur&&<div className="empty" style={{paddingTop:80}}>← Select a bean</div>}
@@ -1028,7 +1032,10 @@ function App(){
               <BeanInfo bean={cur}/>
             </>}
 
-            {editing&&draft&&<React.Fragment>
+            {editing&&draft&&(()=>{
+              const m=draft?.methods?.[method]||DEF[method];
+              const u=f=>v=>updDraftM(f,v);
+              return<>
       <div className="sec-lbl" style={{marginBottom:10}}>Bean Info</div>
       <div className="fg" style={{marginBottom:14}}>
         <Field label="Roaster" value={draft.roaster} onChange={v=>setDraft(d=>({...d,roaster:v}))}/>
@@ -1088,7 +1095,8 @@ function App(){
         <button className="btn p" onClick={adding?saveNew:saveEdit}>{adding?"Save Bean":"Save"}</button>
         <button className="btn" onClick={()=>{if(adding){setAdding(false);setShowList(true);}else setEditing(false);}}>Cancel</button>
       </div>
-</React.Fragment>}
+</>;
+            })()}
           </div>
         </>}
       </div>
