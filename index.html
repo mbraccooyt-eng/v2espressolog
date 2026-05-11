@@ -899,7 +899,7 @@ function App(){
             {["shot","grind",...(method!=="espresso"?["recipe"]:[]),"diagnose","info"].map(t=><button key={t} className={"tab"+(tab===t&&!editing?" active":"")} onClick={()=>{setTab(t);setEditing(false);}}>
               {t==="recipe"?"Recipes":t==="info"?"Bean Info":t.charAt(0).toUpperCase()+t.slice(1)}
             </button>)}
-            <button className={"tab"+(editing?" active":"")} onClick={startEdit}>Edit</button>
+            <button className={"tab"+(editing?" active":"")} onClick={()=>{setDraft({...cur,methods:JSON.parse(JSON.stringify(cur.methods))});setEditing(true);}}>Edit</button>
           </div>
 
           <div className="tc">
