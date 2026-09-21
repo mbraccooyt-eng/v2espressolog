@@ -22,6 +22,7 @@ const METHODS=["espresso","aeropress","pourover"];
 const METHOD_LABELS={espresso:"Espresso",aeropress:"AeroPress",pourover:"Pour Over"};
 const STORAGE_KEY="coffeeLog_v6";
 const LEGACY_KEYS=["coffeeLog_v5","coffeeLog_v4","coffeeLog_v3","coffeeLog_beans_v3"];
+const AWAYLOG_KEY="coffeeLog_awaylog_v1";
 const DEF={
   espresso:{dose:"18",yield:"36",time:"28",temp:"200.5",preBrew:"2s on / 2s off",notes:"",whatWorked:"",whatDidnt:"",iced:""},
   aeropress:{dose:"15",water:"200",temp:"205",steepTime:"90",pressTime:"30",inverted:false,bloom:true,bloomTime:"30",notes:"",whatWorked:"",whatDidnt:""},
@@ -55,9 +56,15 @@ function loadBeans(){
 }
 function saveBeans(b){try{localStorage.setItem(STORAGE_KEY,JSON.stringify(b));}catch(e){}}
 
+function loadAwayLog(){try{const r=localStorage.getItem(AWAYLOG_KEY);return r?JSON.parse(r):[];}catch(e){return[];}}
+function saveAwayLog(a){try{localStorage.setItem(AWAYLOG_KEY,JSON.stringify(a));}catch(e){}}
+
 // ── HELPERS ────────────────────────────────────────────────────────────────
 function grindLabel(pos){if(!pos)return"—";if(pos.dot===0)return String(pos.whole);return pos.whole+"·".repeat(pos.dot);}
 function daysAgo(s){if(!s)return null;const d=new Date(s);if(isNaN(d))return null;const n=Math.floor((Date.now()-d.getTime())/86400000);return n===0?"Today":n===1?"1 day ago":n+" days ago";}
+function daysAgoNum(s){if(!s)return null;const d=new Date(s);if(isNaN(d))return null;return Math.floor((Date.now()-d.getTime())/86400000);}
+function freshness(s){const n=daysAgoNum(s);if(n===null)return null;if(n<5)return{label:"Too Fresh",color:"var(--blue)"};if(n<=30)return{label:"Peak",color:"var(--green)"};if(n<=45)return{label:"Aging",color:"var(--gold)"};return{label:"Past Peak",color:"var(--red)"};}
+function cleanMd(t){if(!t)return"";return t.replace(/^#{1,6}\s+/gm,"").replace(/\*\*(.+?)\*\*/g,"$1").replace(/\*(.+?)\*/g,"$1").replace(/^-{3,}\s*$/gm,"").replace(/^[-*]\s+/gm,"• ").trim();}
 
 // ── AI ─────────────────────────────────────────────────────────────────────
 async function callClaude(system,user,json){
@@ -81,8 +88,36 @@ async function callClaude(system,user,json){
   }
 }
 
-const SYSTEM=`You are an expert specialty coffee consultant. Equipment: La Marzocco Linea Micra (dual boiler), Mahlkonig E64S (calibrated — 0-1 range for espresso, full 0-12 for manual, 5 dots between numbers), Hario V60 with metal filter, standard AeroPress (max 220g water), temperature-controlled kettle, RO water with Third Wave espresso minerals.
-CRITICAL RULES: Shot SLOW >35s = NEVER finer grind. Shot FAST <22s = NEVER coarser. Sour+slow = channeling, fix puck prep first. Bitter+fast = over-extraction, coarser grind. AeroPress max 220g water. 3-5 bullets max. No fluff.`;
+// Vision variant: pass a base64 data URL image (with or without the data: prefix) plus a text prompt.
+async function callClaudeVision(system,userText,imageDataUrl,json){
+  const key=window._COFFEE_API_KEY;
+  if(!key)return json?null:"⚠️ No API key. Tap ⚙ to add your Anthropic API key.";
+  try{
+    const match=imageDataUrl.match(/^data:(image\/[a-zA-Z]+);base64,(.+)$/);
+    if(!match)return json?null:"Invalid image data.";
+    const mediaType=match[1],base64Data=match[2];
+    const res=await fetch("https://api.anthropic.com/v1/messages",{method:"POST",
+      headers:{"Content-Type":"application/json","x-api-key":key,"anthropic-version":"2023-06-01","anthropic-dangerous-direct-browser-access":"true"},
+      body:JSON.stringify({model:"claude-sonnet-4-6",max_tokens:1200,system,messages:[{role:"user",content:[
+        {type:"image",source:{type:"base64",media_type:mediaType,data:base64Data}},
+        {type:"text",text:userText}
+      ]}]})});
+    if(!res.ok){const t=await res.text();return json?null:"API error "+res.status+": "+t.slice(0,200);}
+    const d=await res.json();
+    if(d.error)return json?null:"API error: "+d.error.message;
+    const text=d.content?.map(b=>b.text||"").join("")||"";
+    if(json){try{return JSON.parse(text.replace(/```json|```/g,"").trim());}catch{return null;}}
+    return text;
+  }catch(e){
+    const m=e.message||String(e);
+    if(m.includes("NetworkError")||m.includes("Failed to fetch")||m.includes("Load failed"))
+      return json?null:"⚠️ Network blocked. Try opening in Safari browser directly.";
+    return json?null:"Error: "+m;
+  }
+}
+
+const SYSTEM=`You are an expert specialty coffee consultant. Equipment: La Marzocco Linea Micra (dual boiler), Mahlkonig X64 SD single dose grinder (0-1 range for espresso, full 0-12 for manual methods, 5 dots between each number on the dial), Hario V60 with METAL mesh filter (no paper), AeroPress with PAPER filter (not metal), standard AeroPress (max 220g water capacity), temperature-controlled kettle, RO water with Third Wave espresso minerals.
+CRITICAL RULES: Shot SLOW >35s = NEVER finer grind. Shot FAST <22s = NEVER coarser. Sour+slow = channeling, fix puck prep first. Bitter+fast = over-extraction, coarser grind. AeroPress uses paper filter — grind accordingly. V60 uses metal filter — grind coarser than paper equivalent. AeroPress max 220g water. 3-5 bullets max. No fluff.`;
 
 // ── SMALL COMPONENTS (defined outside App so they never remount) ───────────
 function Field({label,value,onChange,multiline,placeholder}){
@@ -355,6 +390,8 @@ function App(){
   const[diagInput,setDiagInput]=useState("");
   const[shotTime,setShotTime]=useState("");
   const[shotYield,setShotYield]=useState("");
+  const[diagFollowup,setDiagFollowup]=useState("");
+  const[lastDiagCtx,setLastDiagCtx]=useState("");
   const[recipeCtx,setRecipeCtx]=useState("");
   const[recipeFeedback,setRecipeFeedback]=useState("");
   const[showApiModal,setShowApiModal]=useState(false);
@@ -365,15 +402,30 @@ function App(){
   const[urlInput,setUrlInput]=useState("");
   const[urlLoading,setUrlLoading]=useState(false);
   const[urlImport,setUrlImport]=useState(null);
+  const[photoLoading,setPhotoLoading]=useState(false);
+  const[photoImport,setPhotoImport]=useState(null);
+  const[capturedPhoto,setCapturedPhoto]=useState(null);
+  const[awayPhotoLoading,setAwayPhotoLoading]=useState(false);
+  const[awayPhotoImport,setAwayPhotoImport]=useState(null);
+  const[awayCapturedPhoto,setAwayCapturedPhoto]=useState(null);
   const[compass,setCompass]=useState(null);
   const[activeRecipeIdx,setActiveRecipeIdx]=useState(null);
   const[showImportModal,setShowImportModal]=useState(false);
   const[importText,setImportText]=useState("");
   const[importStatus,setImportStatus]=useState("");
+  const[screen,setScreen]=useState("beans");
+  const[awayLog,setAwayLog]=useState(loadAwayLog);
+  const[addingAway,setAddingAway]=useState(false);
+  const[awayDraft,setAwayDraft]=useState({name:"",roaster:"",place:"",method:"",origin:"",process:"",roast:"",flavorProfile:"",notes:"",rating:0,date:""});
+  const[compareIds,setCompareIds]=useState([]);
+  const[discoveryLoading,setDiscoveryLoading]=useState(false);
+  const[discoveryResult,setDiscoveryResult]=useState("");
+  const[kioskMode,setKioskMode]=useState(false);
 
   useEffect(()=>{const chk=()=>setIsMobile(window.innerWidth<680);chk();window.addEventListener("resize",chk);return()=>window.removeEventListener("resize",chk);},[]);
   useEffect(()=>{saveBeans(beans);},[beans]);
   useEffect(()=>{try{const k=localStorage.getItem("coffeeLog_apikey");if(k)window._COFFEE_API_KEY=k;}catch(e){}},[]);
+  useEffect(()=>{saveAwayLog(awayLog);},[awayLog]);
 
   const cur=beans.find(b=>b.id===selId);
   const lg=cur?.grindLogs?.[method]?.slice(-1)[0]||null;
@@ -384,8 +436,8 @@ function App(){
 
   const upd=fn=>setBeans(prev=>{const next=fn(prev);saveBeans(next);return next;});
 
-  const selectBean=id=>{setSelId(id);setShowList(false);setEditing(false);setAdding(false);setTab("shot");setDiagInput("");setUrlImport(null);setCompass(null);setShotTime("");setShotYield("");setActiveRecipeIdx(null);setRecipeFeedback("");setTimeout(()=>{const d=document.querySelector(".detail");if(d)d.scrollTop=0;},50);};
-  const startAdd=()=>{setDraft({roaster:"",name:"",origin:"",process:"",roast:"",altitude:"",varietal:"",flavorProfile:"",roastDate:"",imageUrl:"",imageBase64:"",rating:0,inStock:true,currentlyBrewing:false,methods:{espresso:{...DEF.espresso},aeropress:{...DEF.aeropress},pourover:{...DEF.pourover}}});setAdding(true);setEditing(false);setShowList(false);setUrlImport(null);setUrlInput("");};
+  const selectBean=id=>{setSelId(id);setShowList(false);setEditing(false);setAdding(false);setTab("shot");setDiagInput("");setUrlImport(null);setCompass(null);setShotTime("");setShotYield("");setActiveRecipeIdx(null);setRecipeFeedback("");setDiagFollowup("");setLastDiagCtx("");setTimeout(()=>{const d=document.querySelector(".detail");if(d)d.scrollTop=0;},50);};
+  const startAdd=()=>{setDraft({roaster:"",name:"",origin:"",process:"",roast:"",altitude:"",varietal:"",flavorProfile:"",roastDate:"",imageUrl:"",imageBase64:"",rating:0,inStock:true,currentlyBrewing:false,methods:{espresso:{...DEF.espresso},aeropress:{...DEF.aeropress},pourover:{...DEF.pourover}}});setAdding(true);setEditing(false);setShowList(false);setUrlImport(null);setUrlInput("");setPhotoImport(null);setCapturedPhoto(null);};
   const saveNew=()=>{if(!draft.name)return;const id=Date.now();upd(bs=>[...bs,{...draft,id,grindLogs:{espresso:[],aeropress:[],pourover:[]},savedRecipes:{aeropress:[],pourover:[]}}]);setSelId(id);setAdding(false);setShowList(false);setTab("shot");};
   const delBean=id=>{upd(bs=>bs.filter(b=>b.id!==id));setSelId(null);setShowList(true);};
   const startEdit=()=>{setDraft({...cur,methods:JSON.parse(JSON.stringify(cur.methods))});setEditing(true);};
@@ -458,9 +510,49 @@ function App(){
 
   const importUrl=async()=>{if(!urlInput.trim())return;setUrlLoading(true);setUrlImport(null);const r=await callClaude("Extract coffee bean info from URL. Return ONLY valid JSON, no markdown.",`URL:${urlInput}\nReturn JSON:{"roaster":"","name":"","origin":"","process":"","roast":"","altitude":"","varietal":"","flavorProfile":"","imageUrl":""}`,true);if(r)setDraft(d=>({...d,...r}));setUrlImport(r||{error:"Couldn't parse URL."});setUrlLoading(false);};
 
-  const runDiagnosis=async()=>{
-    if(!diagInput.trim()&&!compass)return;
-    setAiLoading(true);setAiResult("");
+  const handleBagPhoto=(e)=>{
+    const file=e.target.files?.[0];
+    if(!file)return;
+    const reader=new FileReader();
+    reader.onload=async(ev)=>{
+      const dataUrl=ev.target.result;
+      setCapturedPhoto(dataUrl);
+      setPhotoLoading(true);setPhotoImport(null);
+      const r=await callClaudeVision(
+        "You read coffee bag labels and extract structured info. Return ONLY valid JSON, no markdown, no explanation.",
+        `Read this coffee bag label/photo and extract as much as you can identify. Leave a field as empty string "" if not visible or not stated on the bag. Return JSON exactly in this shape:\n{"roaster":"","name":"","origin":"","process":"","roast":"","altitude":"","varietal":"","flavorProfile":"","roastDate":""}\nFor roast, use one of: Light, Light-Medium, Medium, Medium-Dark, Dark — infer from any roast description if not explicit. For roastDate, use YYYY-MM-DD format if a date is visible, else leave empty.`,
+        dataUrl,true
+      );
+      if(r){setDraft(d=>({...d,...r}));setPhotoImport(r);}
+      else setPhotoImport({error:"Couldn't read the label clearly. Try a closer, well-lit photo, or fill in manually."});
+      setPhotoLoading(false);
+    };
+    reader.readAsDataURL(file);
+  };
+
+  const handleAwayPhoto=(e)=>{
+    const file=e.target.files?.[0];
+    if(!file)return;
+    const reader=new FileReader();
+    reader.onload=async(ev)=>{
+      const dataUrl=ev.target.result;
+      setAwayCapturedPhoto(dataUrl);
+      setAwayPhotoLoading(true);setAwayPhotoImport(null);
+      const r=await callClaudeVision(
+        "You read coffee bag labels and menu boards and extract structured info. Return ONLY valid JSON, no markdown, no explanation.",
+        `Read this coffee bag label or cafe menu/board photo and extract what you can identify. Leave a field as empty string "" if not visible or not stated. Return JSON exactly in this shape:\n{"name":"","roaster":"","origin":"","process":"","roast":"","flavorProfile":""}\nFor roast, use one of: Light, Light-Medium, Medium, Medium-Dark, Dark — infer from description if not explicit.`,
+        dataUrl,true
+      );
+      if(r){setAwayDraft(d=>({...d,...r}));setAwayPhotoImport(r);}
+      else setAwayPhotoImport({error:"Couldn't read the label clearly. Try a closer, well-lit photo, or fill in manually."});
+      setAwayPhotoLoading(false);
+    };
+    reader.readAsDataURL(file);
+  };
+
+  const runDiagnosis=async(followup)=>{
+    if(!followup&&!diagInput.trim()&&!compass)return;
+    setAiLoading(true);if(!followup)setAiResult("");
     const tStr=shotTime?shotTime+"s":(md.time?md.time+"s (logged)":"unknown");
     const yStr=shotYield?shotYield+"g":(md.yield?md.yield+"g (logged)":"unknown");
     const slow=shotTime&&parseInt(shotTime)>35?" SHOT WAS SLOW — do NOT recommend finer grind.":"";
@@ -471,7 +563,13 @@ function App(){
       :method==="aeropress"
       ?`Bean:${cur.name},${cur.process},${cur.roast}. AeroPress:${md.dose}g/${md.water}g/${md.temp}°F/steep ${md.steepTime}s/press ${md.pressTime}s.Inverted:${md.inverted}.Bloom:${md.bloom} ${md.bloomTime}s.Grind:${grindLabel(lg?.position)}.`
       :`Bean:${cur.name},${cur.process},${cur.roast}. Pour Over V60:${md.dose}g/${md.water}g/${md.temp}°F/bloom ${md.bloomAmount}g ${md.bloomTime}s/total ${md.totalTime}.Grind:${grindLabel(lg?.position)}.`;
+    if(followup){
+      const r=await callClaude(SYSTEM,`Previous setup and diagnosis:\n${lastDiagCtx}\nPrevious advice:\n${aiResult}\n\nThe person made this adjustment and pulled again: ${followup}\nCurrent setup:${ctx}\n\nDid the adjustment help? What should they try next?`);
+      setAiResult(r);setAiLoading(false);setDiagFollowup("");
+      return;
+    }
     const msg=diagInput.trim()?`Setup:${ctx}\nTasting:${diagInput}\nAdjustments?`:`Setup:${ctx}\nCompass:${compass?.label}.Adjustments?`;
+    setLastDiagCtx(ctx);
     const r=await callClaude(SYSTEM,msg);setAiResult(r);setAiLoading(false);
   };
 
@@ -481,7 +579,7 @@ function App(){
     const saved=cur.savedRecipes?.[method];
     const prev=activeRecipeIdx!==null&&saved?saved[activeRecipeIdx]?.text:null;
     const inst=method==="aeropress"
-      ?"Generate AeroPress recipe. Max 220g water. Include:dose(g),water(g≤220),temp(°F),inverted or standard,bloom time(s),steep time(s),press time(s),grind on 0-12 scale. Brief rationale."
+      ?"Generate AeroPress recipe. Uses PAPER filter. Max 220g water. Include:dose(g),water(g≤220),temp(°F),inverted or standard,bloom time(s),steep time(s),press time(s),grind setting on 0-12 scale with dots (e.g. 5··). Brief rationale."
       :"Generate pour over for Hario V60 with METAL filter (grind coarser than paper). Include:dose(g),water(g),temp(°F),bloom amount(g) and time(s),pour sequence with timing,total time,grind on 0-12 scale. Brief rationale.";
     const r=await callClaude(SYSTEM,`Bean:${bInfo}${recipeCtx?`\nContext:${recipeCtx}`:""}${prev?`\nPrevious recipe:\n${prev}`:""}${feedback?`\nFeedback:${feedback}\nAdjust accordingly.`:""}\n\n${inst}`);
     setAiResult(r);setAiLoading(false);
@@ -536,12 +634,30 @@ function App(){
 
   const saveApiKey=()=>{window._COFFEE_API_KEY=apiKeyInput.trim();try{localStorage.setItem("coffeeLog_apikey",apiKeyInput.trim());}catch(e){}setShowApiModal(false);};
 
+  // ── TASTING LOG (away) ──
+  const addAway=()=>{if(!awayDraft.name.trim())return;setAwayLog(a=>[{...awayDraft,id:Date.now(),date:awayDraft.date||new Date().toLocaleDateString()},...a]);setAwayDraft({name:"",roaster:"",place:"",method:"",origin:"",process:"",roast:"",flavorProfile:"",notes:"",rating:0,date:""});setAddingAway(false);setAwayPhotoImport(null);setAwayCapturedPhoto(null);};
+  const delAway=id=>setAwayLog(a=>a.filter(x=>x.id!==id));
+
+  // ── COMPARE ──
+  const toggleCompare=id=>setCompareIds(c=>c.includes(id)?c.filter(x=>x!==id):c.length>=2?[c[1],id]:[...c,id]);
+
+  // ── DISCOVERY ──
+  const runDiscovery=async()=>{
+    setDiscoveryLoading(true);setDiscoveryResult("");
+    const rated=beans.filter(b=>b.rating>0).map(b=>`${b.name} (${b.roaster}) - ${b.origin||"?"}, ${b.process||"?"}, ${b.roast||"?"} - rated ${b.rating}/10${b.flavorProfile?" - "+b.flavorProfile:""}`).join("\n");
+    const away=awayLog.map(a=>`${a.name}${a.roaster?" ("+a.roaster+")":""} - ${a.origin||"?"}, ${a.process||"?"} - rated ${a.rating||"?"}/10${a.notes?" - "+a.notes:""}`).join("\n");
+    if(!rated&&!away){setDiscoveryResult("Rate a few beans first so there's data to analyze.");setDiscoveryLoading(false);return;}
+    const r=await callClaude("You are a coffee taste profile analyst. Be specific and concise.",
+      `Based on this person's rated coffees, identify patterns in what they like and dislike, then suggest 3-4 specific varietals, processes, or origins they should seek out next, with brief reasoning.\n\nHOME COLLECTION:\n${rated||"none yet"}\n\nTRIED ELSEWHERE:\n${away||"none yet"}\n\nGive: 1) A short taste profile summary (2-3 sentences), 2) A bulleted list of what to try next with 1-line reasoning each.`);
+    setDiscoveryResult(r);setDiscoveryLoading(false);
+  };
+
   const sortedBeans=[...beans].sort((a,b)=>{const ao=a.inStock===false,bo=b.inStock===false;if(ao!==bo)return ao?1:-1;return(b.rating||0)-(a.rating||0);});
   const imgUrl=cur?.imageBase64||cur?.imageUrl;
 
   const AiBox=({showSave})=><>
     {aiLoading&&<div className="ai-loading"><div className="ai-dot"/><div className="ai-dot"/><div className="ai-dot"/></div>}
-    {aiResult&&<div className="ai-box"><div className="ai-lbl">Result</div><div className="ai-result">{aiResult}</div>
+    {aiResult&&<div className="ai-box"><div className="ai-lbl">Result</div><div className="ai-result">{cleanMd(aiResult)}</div>
       {showSave&&<div style={{marginTop:10,display:"flex",gap:8,flexWrap:"wrap"}}>
         <button className="btn p sm" onClick={()=>saveRecipe(aiResult)}>Save Recipe</button>
         <button className="btn sm" style={{borderColor:"var(--green)",color:"var(--green)"}} onClick={()=>{applyRecipe(aiResult);saveRecipe(aiResult);}}>Save & Apply</button>
@@ -566,12 +682,16 @@ function App(){
       .btn.sm{padding:5px 10px;font-size:9px;}
       .btn.full{width:100%;text-align:center;padding:13px;font-size:11px;}
       .btn.ai{background:#1e1628;border-color:#4a3a6a;color:var(--purple);}
+      .photo-scan-btn{display:flex;align-items:center;justify-content:center;gap:8px;width:100%;padding:14px;font-size:12px;cursor:pointer;-webkit-tap-highlight-color:transparent;}
+      .photo-preview-img{width:100%;max-height:220px;object-fit:contain;background:var(--bg3);border:1px solid var(--border);margin-top:10px;border-radius:2px;}
       .btn.ai:disabled{opacity:.5;cursor:not-allowed;}
       .btn.icon{padding:6px 10px;font-size:15px;border-color:transparent;}
+      .kiosk-toggle-btn{display:flex;align-items:center;justify-content:center;}
       .btn.timer-btn{background:#1a2a1a;border-color:#3a5a3a;color:var(--green);font-size:11px;padding:11px;width:100%;text-align:center;margin-bottom:14px;}
       .dl{display:flex;flex:1;min-height:0;overflow:hidden;width:100%;}
       .list-wrap{display:flex;flex-direction:column;overflow:hidden;flex-shrink:0;}
       .list-hdr{padding:16px 16px 12px;background:var(--bg2);flex-shrink:0;}
+      .list-hdr-top{display:flex;align-items:flex-start;justify-content:space-between;gap:10px;}
       .list-hdr-title{font-family:'Playfair Display',serif;font-size:16px;color:var(--text3);font-style:italic;}
       .list-hdr-sub{font-size:9px;color:var(--dim);letter-spacing:1px;text-transform:uppercase;margin-top:2px;}
       .list-scroll{flex:1;overflow-y:auto;-webkit-overflow-scrolling:touch;}
@@ -598,7 +718,8 @@ function App(){
       .bean-title{font-family:'Playfair Display',serif;font-size:22px;color:var(--gold);line-height:1.1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
       .bean-roaster-lbl{font-size:9px;color:var(--muted);letter-spacing:2px;text-transform:uppercase;margin-top:3px;}
       .bean-actions{display:flex;gap:6px;margin-top:10px;flex-wrap:wrap;}
-      .roast-date{font-size:9px;color:var(--muted);margin-top:4px;}
+      .roast-date{font-size:9px;color:var(--muted);margin-top:4px;display:flex;align-items:center;gap:6px;}
+      .fresh-badge{font-size:7px;letter-spacing:1px;text-transform:uppercase;padding:1px 6px;border:1px solid;border-radius:2px;}
       .pills{display:flex;gap:6px;flex-wrap:wrap;margin-top:8px;}
       .pill{font-size:8px;letter-spacing:1px;text-transform:uppercase;color:var(--text3);border:1px solid var(--border);padding:3px 8px;}
       .rating-wrap{margin-top:10px;}
@@ -716,6 +837,50 @@ function App(){
       .empty{padding:40px 16px;text-align:center;color:var(--dim);font-size:12px;}
       .toast{position:fixed;bottom:18px;right:14px;background:var(--gold);color:var(--bg);font-family:'DM Mono',monospace;font-size:10px;letter-spacing:1px;text-transform:uppercase;padding:8px 14px;opacity:0;transition:opacity .2s;pointer-events:none;z-index:100;}
       .toast.show{opacity:1;}
+
+      /* SCREEN NAV */
+      .screen-nav{display:flex;border-bottom:1px solid var(--border);background:var(--bg2);overflow-x:auto;scrollbar-width:none;flex-shrink:0;}
+      .screen-nav::-webkit-scrollbar{display:none;}
+      .screen-tab{font-family:'DM Mono',monospace;font-size:9px;letter-spacing:1.5px;text-transform:uppercase;padding:10px 14px;color:var(--muted);border-bottom:2px solid transparent;margin-bottom:-1px;cursor:pointer;white-space:nowrap;flex-shrink:0;border:none;background:none;-webkit-tap-highlight-color:transparent;}
+      .screen-tab.active{color:var(--gold);border-bottom-color:var(--gold);}
+      .screen-body{flex:1;overflow-y:auto;overflow-x:hidden;-webkit-overflow-scrolling:touch;width:100%;}
+
+      /* COMPARE */
+      .compare-picker{display:flex;flex-wrap:wrap;gap:6px;}
+      .compare-chip{font-family:'DM Mono',monospace;font-size:11px;padding:7px 12px;background:var(--bg3);border:1px solid var(--border);color:var(--text3);cursor:pointer;-webkit-tap-highlight-color:transparent;}
+      .compare-chip.sel{border-color:var(--gold);color:var(--gold);background:#2a1e0a;}
+      .compare-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;}
+      .compare-col{background:var(--bg3);border:1px solid var(--border);padding:14px;min-width:0;}
+      .compare-name{font-family:'Playfair Display',serif;font-size:16px;color:var(--gold);}
+      .compare-roaster{font-size:9px;color:var(--muted);margin-bottom:8px;}
+      .compare-row{display:flex;justify-content:space-between;gap:8px;font-size:11px;color:var(--text2);padding:4px 0;border-bottom:1px solid var(--border2);}
+      .compare-row span:first-child{color:var(--muted);flex-shrink:0;}
+      .compare-row span:last-child{text-align:right;overflow-wrap:anywhere;}
+      .compare-notes{font-size:11px;color:var(--text3);margin-top:8px;line-height:1.6;}
+
+      /* DISCOVERY */
+      .profile-bars{display:flex;flex-direction:column;gap:8px;}
+      .profile-row{display:flex;align-items:center;gap:10px;}
+      .profile-lbl{font-size:11px;color:var(--text3);width:110px;flex-shrink:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+      .profile-bar-track{flex:1;height:6px;background:var(--border);border-radius:3px;overflow:hidden;}
+      .profile-bar-fill{height:100%;background:var(--gold);border-radius:3px;}
+      .profile-val{font-size:11px;color:var(--gold);width:26px;flex-shrink:0;text-align:right;}
+
+      /* KIOSK */
+      .kiosk-view{position:fixed;inset:0;background:var(--bg);z-index:70;overflow-y:auto;padding:24px;}
+      .kiosk-hdr{display:flex;justify-content:space-between;align-items:center;margin-bottom:24px;}
+      .kiosk-hdr h1{font-family:'Playfair Display',serif;font-size:32px;color:var(--gold);}
+      .kiosk-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:16px;}
+      .kiosk-card{background:var(--bg2);border:1px solid var(--border);cursor:pointer;overflow:hidden;-webkit-tap-highlight-color:transparent;}
+      .kiosk-card:active{border-color:var(--gold);}
+      .kiosk-card.brewing{border-color:var(--blue);}
+      .kiosk-card-img{width:100%;height:140px;background:var(--bg3);display:flex;align-items:center;justify-content:center;font-size:32px;overflow:hidden;}
+      .kiosk-card-body{padding:14px;}
+      .kiosk-card-name{font-family:'Playfair Display',serif;font-size:18px;color:var(--gold);}
+      .kiosk-card-roaster{font-size:10px;color:var(--muted);margin-top:2px;}
+      .kiosk-card-meta{font-size:10px;color:var(--text3);margin-top:6px;}
+      .kiosk-card-flavor{font-size:11px;color:var(--text2);margin-top:6px;font-style:italic;}
+
       @media(min-width:680px){
         .back{display:none!important;}
         .bc-arrow{display:none!important;}
@@ -724,6 +889,7 @@ function App(){
         .bean-hero-content{padding:18px 28px 14px;}
         .pg{grid-template-columns:repeat(3,minmax(0,1fr));}
         .pm.w{grid-column:span 1;}
+        .kiosk-grid{grid-template-columns:repeat(auto-fill,minmax(260px,1fr));}
       }
     `}</style>
 
@@ -731,24 +897,40 @@ function App(){
       <div className="hdr-l">
         {isMobile&&!showList&&!adding&&!editing&&<button className="back" onClick={()=>{setShowList(true);}}>‹</button>}
         {isMobile&&(adding||editing)&&<button className="back" onClick={()=>{if(adding){setAdding(false);setShowList(true);}else{setEditing(false);}}}>‹</button>}
-        <div><h1>Coffee Log</h1><div className="hdr-sub">Micra · E64S · V60 · AeroPress</div></div>
+        <div><h1>Coffee Log</h1><div className="hdr-sub">Micra · X64 SD · V60 · AeroPress</div></div>
       </div>
       <div className="hdr-r">
-        <button className="btn sm" onClick={()=>setShowImportModal(true)}>Import</button>
-        <button className="btn sm" onClick={exportText}>{copied?"✓":"Export"}</button>
+        {screen==="beans"&&<button className="btn sm" onClick={()=>setShowImportModal(true)}>Import</button>}
+        {screen==="beans"&&<button className="btn sm" onClick={exportText}>{copied?"✓":"Export"}</button>}
+        <button className="btn icon kiosk-toggle-btn" onClick={()=>setKioskMode(k=>!k)} title="Display Mode">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <rect x="2" y="4" width="20" height="13" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/>
+          </svg>
+        </button>
         <button className="btn icon" onClick={()=>{setApiKeyInput(window._COFFEE_API_KEY||"");setShowApiModal(true);}}>⚙</button>
       </div>
     </div>
 
-    <div className="dl">
+    {!kioskMode&&<div className="screen-nav">
+      {[["beans","Beans"],["compare","Compare"],["discovery","Discovery"],["away","Tasting Log"]].map(([id,label])=>
+        <button key={id} className={"screen-tab"+(screen===id?" active":"")} onClick={()=>{setScreen(id);if(id==="beans"){setShowList(true);}}}>{label}</button>
+      )}
+    </div>}
+
+    {screen==="beans"&&<div className="dl">
       {/* BEAN LIST */}
       <div className="list-wrap" style={(isMobile&&(!showList||adding||editing))?{display:"none"}:{width:isMobile?"100%":undefined}}>
         <div className="list-hdr">
-          <div className="list-hdr-title">Your Beans</div>
-          <div className="list-hdr-sub">{beans.length} beans · {beans.filter(b=>b.inStock!==false).length} in stock</div>
+          <div className="list-hdr-top">
+            <div>
+              <div className="list-hdr-title">Your Beans</div>
+              <div className="list-hdr-sub">{beans.length} beans · {beans.filter(b=>b.inStock!==false).length} in stock</div>
+            </div>
+            <button className="btn p sm" onClick={startAdd}>+ Add</button>
+          </div>
         </div>
         <div className="list-scroll">
-          {beans.length===0&&<div className="empty">No beans yet — tap + Add Bean</div>}
+          {beans.length===0&&<div className="empty">No beans yet — tap + Add above</div>}
           {sortedBeans.map(b=>{
             const eg=b.grindLogs?.espresso?.slice(-1)[0];
             const da=daysAgo(b.roastDate);
@@ -763,6 +945,7 @@ function App(){
                 <div className="bc-badges">
                   {b.currentlyBrewing&&<span className="bc-badge brewing">Brewing Now</span>}
                   {out&&<span className="bc-badge out">Out of Stock</span>}
+                  {!out&&freshness(b.roastDate)&&freshness(b.roastDate).label!=="Peak"&&<span className="bc-badge" style={{color:freshness(b.roastDate).color,borderColor:freshness(b.roastDate).color,background:"transparent"}}>{freshness(b.roastDate).label}</span>}
                 </div>
                 {b.rating>0&&<div className="bc-rating">{"★".repeat(Math.round(b.rating/2))} {b.rating}/10</div>}
               </div>
@@ -770,14 +953,26 @@ function App(){
             </div>;
           })}
         </div>
-        <div className="list-footer"><button className="btn p full" onClick={startAdd}>+ Add Bean</button></div>
       </div>
 
       {/* ADD BEAN */}
       {adding&&<div className="detail" style={isMobile?{width:"100%"}:{}}>
         <div className="tc" style={{paddingTop:20}}>
           <div style={{fontFamily:"'Playfair Display',serif",fontSize:20,color:"var(--gold)",marginBottom:16}}>New Bean</div>
-          <div className="sec-lbl" style={{marginBottom:8}}>Import from URL</div>
+
+          <div className="sec-lbl" style={{marginBottom:8}}>Scan Bag Label</div>
+          <div className="sec-txt" style={{marginBottom:10,fontSize:12}}>Take or upload a photo of the bag — roaster, origin, process, roast, and notes get read automatically.</div>
+          <label className="btn ai photo-scan-btn">
+            📷 Take Photo / Upload
+            <input type="file" accept="image/*" capture="environment" style={{display:"none"}} onChange={handleBagPhoto}/>
+          </label>
+          {capturedPhoto&&<img src={capturedPhoto} alt="Scanned bag" className="photo-preview-img"/>}
+          {photoLoading&&<div className="ai-loading" style={{marginTop:10}}><div className="ai-dot"/><div className="ai-dot"/><div className="ai-dot"/></div>}
+          {photoImport&&!photoImport.error&&<div style={{background:"#1a2818",border:"1px solid #3a5a28",padding:10,marginTop:10,fontSize:11,color:"var(--green)",lineHeight:1.6}}>✓ Read: {photoImport.name||"(name not found)"}{photoImport.roaster?" by "+photoImport.roaster:""} — check the fields below and fill in anything missing.</div>}
+          {photoImport?.error&&<div style={{color:"var(--red)",fontSize:11,marginTop:10}}>{photoImport.error}</div>}
+          <div className="div"/>
+
+          <div className="sec-lbl" style={{marginBottom:8}}>Or Import from URL</div>
           <div style={{display:"flex",gap:8,marginBottom:10}}>
             <input style={{flex:1,minWidth:0,background:"var(--bg3)",border:"1px solid var(--border)",color:"var(--text)",fontFamily:"'DM Mono',monospace",fontSize:14,padding:"9px 11px",outline:"none",WebkitAppearance:"none",borderRadius:0}} placeholder="Paste roaster product URL..." value={urlInput} onChange={e=>setUrlInput(e.target.value)}/>
             <button className="btn ai" onClick={importUrl} disabled={urlLoading||!urlInput.trim()}>{urlLoading?"...":"Import"}</button>
@@ -810,7 +1005,7 @@ function App(){
             <div className="bean-hero-content">
               <div className="bean-title">{cur.name}</div>
               <div className="bean-roaster-lbl">{cur.roaster}</div>
-              {cur.roastDate&&<div className="roast-date">{daysAgo(cur.roastDate)||cur.roastDate}</div>}
+              {cur.roastDate&&<div className="roast-date">{daysAgo(cur.roastDate)||cur.roastDate}{freshness(cur.roastDate)&&<span className="fresh-badge" style={{color:freshness(cur.roastDate).color,borderColor:freshness(cur.roastDate).color}}>{freshness(cur.roastDate).label}</span>}</div>}
               <div className="bean-actions">
                 <button className="btn sm" style={{borderColor:cur.inStock!==false?"#3a5a28":"#5a2a2a",color:cur.inStock!==false?"var(--green)":"var(--red)"}} onClick={()=>updB("inStock",cur.inStock===false)}>
                   {cur.inStock!==false?"✓ In Stock":"✗ Out of Stock"}
@@ -830,7 +1025,7 @@ function App(){
           </div>
 
           <div className="method-row">
-            {METHODS.map(m=><button key={m} className={"method-btn"+(method===m?" active":"")} onClick={()=>{setMethod(m);setTab("shot");setDiagInput("");setCompass(null);setShotTime("");setShotYield("");}}>
+            {METHODS.map(m=><button key={m} className={"method-btn"+(method===m?" active":"")} onClick={()=>{setMethod(m);setTab("shot");setDiagInput("");setCompass(null);setShotTime("");setShotYield("");setDiagFollowup("");setLastDiagCtx("");}}>
               {METHOD_LABELS[m]}
             </button>)}
           </div>
@@ -952,10 +1147,15 @@ function App(){
               <div className="sec-lbl" style={{marginBottom:6}}>Describe Your Cup</div>
               <textarea className="ai-ta" rows={3} placeholder={method==="espresso"?"Taste, texture, finish...":method==="aeropress"?"e.g. 'Muddy, over-extracted...'":"e.g. 'Flat, no clarity...'"} value={diagInput} onChange={e=>setDiagInput(e.target.value)}/>
               <div className="fa" style={{marginBottom:14}}>
-                <button className="btn ai" disabled={aiLoading||(!diagInput.trim()&&!compass)} onClick={runDiagnosis}>{aiLoading?"Diagnosing...":"Diagnose"}</button>
-                {(aiResult||diagInput||compass)&&<button className="btn sm" onClick={()=>{setAiResult("");setDiagInput("");setCompass(null);setShotTime("");setShotYield("");}}>Clear</button>}
+                <button className="btn ai" disabled={aiLoading||(!diagInput.trim()&&!compass)} onClick={()=>runDiagnosis()}>{aiLoading?"Diagnosing...":"Diagnose"}</button>
+                {(aiResult||diagInput||compass)&&<button className="btn sm" onClick={()=>{setAiResult("");setDiagInput("");setCompass(null);setShotTime("");setShotYield("");setDiagFollowup("");setLastDiagCtx("");}}>Clear</button>}
               </div>
               <AiBox/>
+              {aiResult&&!aiLoading&&<div style={{marginTop:-4,marginBottom:14}}>
+                <div className="sec-lbl" style={{marginBottom:6}}>Made an adjustment? Pull again and tell me what happened</div>
+                <textarea className="ai-ta" rows={2} placeholder="e.g. 'Went finer to 0·, shot ran 34s now, still a bit sour' or 'Fixed puck prep, tastes much better now'" value={diagFollowup} onChange={e=>setDiagFollowup(e.target.value)}/>
+                <button className="btn ai" disabled={aiLoading||!diagFollowup.trim()} onClick={()=>runDiagnosis(diagFollowup)}>{aiLoading?"Checking...":"Get Next Step"}</button>
+              </div>}
             </>}
 
             {tab==="info"&&<>
@@ -970,7 +1170,152 @@ function App(){
           </div>
         </>}
       </div>}
-    </div>
+    </div>}
+
+    {screen==="compare"&&<div className="screen-body">
+      <div className="tc">
+        <div className="sec-lbl" style={{marginBottom:10}}>Compare Beans</div>
+        <div className="sec-txt" style={{marginBottom:12,fontSize:12}}>Pick up to two beans to compare side by side.</div>
+        <div className="compare-picker">
+          {sortedBeans.map(b=><button key={b.id} className={"compare-chip"+(compareIds.includes(b.id)?" sel":"")} onClick={()=>toggleCompare(b.id)}>{b.name}</button>)}
+        </div>
+        {compareIds.length===0&&<div className="empty-grind" style={{marginTop:20}}>Select beans above to compare</div>}
+        {compareIds.length>0&&<div className="compare-grid" style={{marginTop:16}}>
+          {compareIds.map(id=>{
+            const b=beans.find(x=>x.id===id);
+            if(!b)return null;
+            const e=b.methods.espresso;
+            return<div key={id} className="compare-col">
+              <div className="compare-name">{b.name}</div>
+              <div className="compare-roaster">{b.roaster}</div>
+              {b.rating>0&&<div className="bc-rating" style={{marginBottom:8}}>{"★".repeat(Math.round(b.rating/2))} {b.rating}/10</div>}
+              <div className="compare-row"><span>Origin</span><span>{b.origin||"—"}</span></div>
+              <div className="compare-row"><span>Process</span><span>{b.process||"—"}</span></div>
+              <div className="compare-row"><span>Roast</span><span>{b.roast||"—"}</span></div>
+              <div className="compare-row"><span>Altitude</span><span>{b.altitude||"—"}</span></div>
+              <div className="compare-row"><span>Flavor</span><span>{b.flavorProfile||"—"}</span></div>
+              <div className="div" style={{margin:"10px 0"}}/>
+              <div className="compare-row"><span>Dose→Yield</span><span>{e.dose}g→{e.yield}g</span></div>
+              <div className="compare-row"><span>Time</span><span>{e.time}s</span></div>
+              <div className="compare-row"><span>Temp</span><span>{e.temp}°F</span></div>
+              {e.notes&&<div className="compare-notes">{e.notes}</div>}
+            </div>;
+          })}
+        </div>}
+      </div>
+    </div>}
+
+    {screen==="discovery"&&<div className="screen-body">
+      <div className="tc">
+        <div className="sec-lbl" style={{marginBottom:6}}>Your Taste Profile</div>
+        <div className="sec-txt" style={{marginBottom:14,fontSize:12}}>AI analysis of your ratings plus a visual breakdown by process and origin.</div>
+        {(()=>{
+          const rated=beans.filter(b=>b.rating>0);
+          const groupBy=(field)=>{
+            const map={};
+            rated.forEach(b=>{const key=(b[field]&&b[field].trim())||"Unknown";map[key]=map[key]||{sum:0,n:0};map[key].sum+=b.rating;map[key].n++;});
+            return Object.entries(map).map(([k,v])=>({k,avg:v.sum/v.n,n:v.n})).sort((a,b)=>b.avg-a.avg);
+          };
+          const originRows=groupBy("origin");
+          const procRows=groupBy("process");
+          const roastRows=groupBy("roast");
+          const Bars=({rows})=><div className="profile-bars">
+            {rows.map(row=><div key={row.k} className="profile-row">
+              <span className="profile-lbl">{row.k} ({row.n})</span>
+              <div className="profile-bar-track"><div className="profile-bar-fill" style={{width:(row.avg*10)+"%"}}/></div>
+              <span className="profile-val">{row.avg.toFixed(1)}</span>
+            </div>)}
+          </div>;
+          return rated.length===0?<div className="empty-grind">Rate a few beans to see your profile</div>:<>
+            <div className="sec-lbl" style={{marginBottom:8}}>By Origin</div>
+            <Bars rows={originRows}/>
+            <div className="sec-lbl" style={{marginBottom:8,marginTop:16}}>By Process</div>
+            <Bars rows={procRows}/>
+            <div className="sec-lbl" style={{marginBottom:8,marginTop:16}}>By Roast Level</div>
+            <Bars rows={roastRows}/>
+          </>;
+        })()}
+        <div className="div"/>
+        <div className="sec-lbl" style={{marginBottom:8}}>AI Recommendations</div>
+        <button className="btn ai" disabled={discoveryLoading} onClick={runDiscovery}>{discoveryLoading?"Analyzing...":"Analyze & Recommend"}</button>
+        {discoveryLoading&&<div className="ai-loading" style={{marginTop:10}}><div className="ai-dot"/><div className="ai-dot"/><div className="ai-dot"/></div>}
+        {discoveryResult&&<div className="ai-box" style={{marginTop:12}}><div className="ai-lbl">Result</div><div className="ai-result">{cleanMd(discoveryResult)}</div></div>}
+      </div>
+    </div>}
+
+    {screen==="away"&&<div className="screen-body">
+      <div className="tc">
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
+          <div className="sec-lbl">Tasting Log</div>
+          {!addingAway&&<button className="btn p sm" onClick={()=>{setAddingAway(true);setAwayPhotoImport(null);setAwayCapturedPhoto(null);}}>+ Log One</button>}
+        </div>
+        <div className="sec-txt" style={{marginBottom:14,fontSize:12}}>Quick log for coffee you tried at a cafe or elsewhere — no params needed.</div>
+        {addingAway&&<div className="ga-form">
+          <div className="sec-lbl" style={{marginBottom:8}}>Scan Bag or Menu</div>
+          <label className="btn ai photo-scan-btn">
+            📷 Take Photo / Upload
+            <input type="file" accept="image/*" capture="environment" style={{display:"none"}} onChange={handleAwayPhoto}/>
+          </label>
+          {awayCapturedPhoto&&<img src={awayCapturedPhoto} alt="Scanned label" className="photo-preview-img"/>}
+          {awayPhotoLoading&&<div className="ai-loading" style={{marginTop:10}}><div className="ai-dot"/><div className="ai-dot"/><div className="ai-dot"/></div>}
+          {awayPhotoImport&&!awayPhotoImport.error&&<div style={{background:"#1a2818",border:"1px solid #3a5a28",padding:10,marginTop:10,marginBottom:12,fontSize:11,color:"var(--green)",lineHeight:1.6}}>✓ Read: {awayPhotoImport.name||"(name not found)"}{awayPhotoImport.roaster?" by "+awayPhotoImport.roaster:""} — check fields below.</div>}
+          {awayPhotoImport?.error&&<div style={{color:"var(--red)",fontSize:11,marginTop:10,marginBottom:12}}>{awayPhotoImport.error}</div>}
+          <div className="div"/>
+          <div className="fg">
+            <Field label="Bean / Coffee Name" value={awayDraft.name} onChange={v=>setAwayDraft(d=>({...d,name:v}))}/>
+            <Field label="Roaster" value={awayDraft.roaster} onChange={v=>setAwayDraft(d=>({...d,roaster:v}))}/>
+            <Field label="Where" value={awayDraft.place} onChange={v=>setAwayDraft(d=>({...d,place:v}))} placeholder="Cafe or location"/>
+            <Field label="Method" value={awayDraft.method} onChange={v=>setAwayDraft(d=>({...d,method:v}))} placeholder="Pour over, espresso..."/>
+            <Field label="Origin" value={awayDraft.origin} onChange={v=>setAwayDraft(d=>({...d,origin:v}))}/>
+            <Field label="Process" value={awayDraft.process} onChange={v=>setAwayDraft(d=>({...d,process:v}))}/>
+            <Field label="Roast Level" value={awayDraft.roast} onChange={v=>setAwayDraft(d=>({...d,roast:v}))}/>
+            <Field label="Date" value={awayDraft.date} onChange={v=>setAwayDraft(d=>({...d,date:v}))} placeholder="Leave blank for today"/>
+            <div className="field full"><Field label="Flavor Profile" value={awayDraft.flavorProfile} onChange={v=>setAwayDraft(d=>({...d,flavorProfile:v}))}/></div>
+            <div className="field full"><Field label="Notes" value={awayDraft.notes} onChange={v=>setAwayDraft(d=>({...d,notes:v}))} multiline placeholder="What you liked, want to remember..."/></div>
+          </div>
+          <div className="sec-lbl" style={{marginBottom:6}}>Rating</div>
+          <StarRating value={awayDraft.rating} onChange={v=>setAwayDraft(d=>({...d,rating:v}))}/>
+          <div className="fa" style={{marginTop:10}}>
+            <button className="btn p sm" onClick={addAway}>Save</button>
+            <button className="btn sm" onClick={()=>{setAddingAway(false);setAwayPhotoImport(null);setAwayCapturedPhoto(null);}}>Cancel</button>
+          </div>
+        </div>}
+        {awayLog.length===0&&!addingAway&&<div className="empty-grind">Nothing logged yet</div>}
+        <div className="gl" style={{marginTop:awayLog.length?12:0}}>
+          {awayLog.map(a=><div key={a.id} className="ge">
+            <div>
+              <div className="ge-pos" style={{fontSize:15,letterSpacing:0}}>{a.name}</div>
+              <div className="ge-date">{[a.roaster,a.place].filter(Boolean).join(" · ")} {a.date&&"· "+a.date}</div>
+              {(a.origin||a.process||a.roast)&&<div className="ge-note">{[a.origin,a.process,a.roast].filter(Boolean).join(" | ")}</div>}
+              {a.flavorProfile&&<div className="ge-note">{a.flavorProfile}</div>}
+              {a.notes&&<div className="ge-note">{a.notes}</div>}
+              {a.rating>0&&<div className="bc-rating" style={{marginTop:4}}>{"★".repeat(Math.round(a.rating/2))} {a.rating}/10</div>}
+            </div>
+            <button className="btn d sm" onClick={()=>delAway(a.id)}>✕</button>
+          </div>)}
+        </div>
+      </div>
+    </div>}
+
+    {kioskMode&&<div className="kiosk-view">
+      <div className="kiosk-hdr"><h1>Coffee Bar</h1><button className="btn sm" onClick={()=>setKioskMode(false)}>Exit Display</button></div>
+      <div className="kiosk-grid">
+        {sortedBeans.filter(b=>b.inStock!==false).map(b=>{
+          const img=b.imageBase64||b.imageUrl;
+          return<div key={b.id} className={"kiosk-card"+(b.currentlyBrewing?" brewing":"")} onClick={()=>{setSelId(b.id);setKioskMode(false);setScreen("beans");setShowList(false);}}>
+            <div className="kiosk-card-img">{img?<img src={img} alt={b.name} style={{width:"100%",height:"100%",objectFit:"cover"}}/>:"☕"}</div>
+            <div className="kiosk-card-body">
+              <div className="kiosk-card-name">{b.name}</div>
+              <div className="kiosk-card-roaster">{b.roaster}</div>
+              <div className="kiosk-card-meta">{[b.origin,b.process,b.roast].filter(Boolean).join(" · ")}</div>
+              {b.flavorProfile&&<div className="kiosk-card-flavor">{b.flavorProfile}</div>}
+              {b.rating>0&&<div className="bc-rating">{"★".repeat(Math.round(b.rating/2))} {b.rating}/10</div>}
+              {b.currentlyBrewing&&<div className="bc-badge brewing" style={{display:"inline-block",marginTop:6}}>Brewing Now</div>}
+            </div>
+          </div>;
+        })}
+      </div>
+    </div>}
 
     {showTimer&&<TimerModal stages={timerStages} onClose={()=>setShowTimer(false)}/>}
 
