@@ -9,7 +9,7 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.2/babel.min.js"></script>
-<style>*,*::before,*::after{box-sizing:border-box;margin:0;padding:0;}html,body{background:#1a1410;height:100%;width:100%;overflow-x:hidden;-webkit-text-size-adjust:100%;}#root{height:100%;}</style>
+<style>*,*::before,*::after{box-sizing:border-box;margin:0;padding:0;}html,body{background:#1a1410;height:100%;height:100dvh;width:100%;overflow:hidden;-webkit-text-size-adjust:100%;position:fixed;inset:0;}#root{height:100%;}</style>
 </head>
 <body>
 <div id="root"></div>
@@ -63,6 +63,7 @@ function saveAwayLog(a){try{localStorage.setItem(AWAYLOG_KEY,JSON.stringify(a));
 function grindLabel(pos){if(!pos)return"—";if(pos.dot===0)return String(pos.whole);return pos.whole+"·".repeat(pos.dot);}
 function daysAgo(s){if(!s)return null;const d=new Date(s);if(isNaN(d))return null;const n=Math.floor((Date.now()-d.getTime())/86400000);return n===0?"Today":n===1?"1 day ago":n+" days ago";}
 function daysAgoNum(s){if(!s)return null;const d=new Date(s);if(isNaN(d))return null;return Math.floor((Date.now()-d.getTime())/86400000);}
+function fmtDate(s){if(!s)return"";const d=new Date(s+(s.length<=10?"T00:00:00":""));if(isNaN(d))return s;const mm=String(d.getMonth()+1).padStart(2,"0"),dd=String(d.getDate()).padStart(2,"0"),yy=String(d.getFullYear()).slice(-2);return`${mm}/${dd}/${yy}`;}
 function freshness(s){const n=daysAgoNum(s);if(n===null)return null;if(n<5)return{label:"Too Fresh",color:"var(--blue)"};if(n<=30)return{label:"Peak",color:"var(--green)"};if(n<=45)return{label:"Aging",color:"var(--gold)"};return{label:"Past Peak",color:"var(--red)"};}
 function cleanMd(t){if(!t)return"";return t.replace(/^#{1,6}\s+/gm,"").replace(/\*\*(.+?)\*\*/g,"$1").replace(/\*(.+?)\*/g,"$1").replace(/^-{3,}\s*$/gm,"").replace(/^[-*]\s+/gm,"• ").trim();}
 
@@ -221,59 +222,56 @@ function TimerModal({stages,onClose}){
 
 function Compass({onSelect,selected}){
   const zones=[
-    {id:"overwhelming",x:22,y:18,label:"Overwhelming",desc:"Sour, salty, overwhelming intensity",color:"#c8b840",fix:"Decrease yield. Improve puck prep and distribution evenness."},
-    {id:"intense_sour",x:30,y:30,label:"Intense/Sour",desc:"Intense, sour, salty, strong",color:"#c8c040",fix:"Improve extraction evenness — better distribution. Finer grind only if shot was fast."},
-    {id:"substantial",x:37,y:42,label:"Substantial",desc:"Substantial, strong, slightly under-extracted",color:"#a8c060",fix:"Finer grind or improve distribution to increase extraction."},
-    {id:"sweet_spot",x:52,y:38,label:"Sweet Spot ✓",desc:"Sweet, balanced, rich, luscious, fruity",color:"#70b870",fix:"Dialed in — note these settings carefully."},
-    {id:"balanced",x:45,y:54,label:"Balanced",desc:"Balanced, ripe, tasty",color:"#80b868",fix:"Very close. Minor grind adjustment may refine further."},
-    {id:"nuanced",x:60,y:50,label:"Nuanced",desc:"Nuanced, fluffy, creamy, delicate",color:"#78b878",fix:"Increase yield slightly for more body while keeping sweetness."},
-    {id:"generic",x:32,y:62,label:"Generic/Bland",desc:"Generic, quick finish, bland, thin",color:"#b8a840",fix:"Extract more — finer grind. Also increase dose for strength."},
-    {id:"watery_sour",x:24,y:74,label:"Watery/Sour",desc:"Watery, bitter, dry — poor extraction",color:"#c89040",fix:"Major extraction improvement needed — finer grind, better puck prep, check grinder."},
-    {id:"bitter_dry",x:68,y:60,label:"Bitter/Dry",desc:"Bitter, dry, powdery, empty",color:"#c87850",fix:"Increase yield (longer shot). Try coarser grind if shot ran very long."},
-    {id:"watery_bitter",x:76,y:72,label:"Watery/Bitter",desc:"Watery, bitter, over-extracted and weak",color:"#c86040",fix:"Coarser grind, decrease yield, increase dose. Shot is over-extracted and weak."},
+    {id:"overwhelming",n:1,x:22,y:16,label:"Overwhelming",desc:"Sour, salty, overwhelming intensity",color:"#c8b840",fix:"Decrease yield. Improve puck prep and distribution evenness."},
+    {id:"intense_sour",n:2,x:32,y:30,label:"Intense / Sour",desc:"Intense, sour, salty, strong",color:"#c8c040",fix:"Improve extraction evenness — better distribution. Finer grind only if shot was fast."},
+    {id:"substantial",n:3,x:42,y:44,label:"Substantial",desc:"Substantial, strong, slightly under-extracted",color:"#a8c060",fix:"Finer grind or improve distribution to increase extraction."},
+    {id:"sweet_spot",n:4,x:55,y:40,label:"Sweet Spot ✓",desc:"Sweet, balanced, rich, luscious, fruity",color:"#70b870",fix:"Dialed in — note these settings carefully."},
+    {id:"balanced",n:5,x:46,y:58,label:"Balanced",desc:"Balanced, ripe, tasty",color:"#80b868",fix:"Very close. Minor grind adjustment may refine further."},
+    {id:"nuanced",n:6,x:64,y:52,label:"Nuanced",desc:"Nuanced, fluffy, creamy, delicate",color:"#78b878",fix:"Increase yield slightly for more body while keeping sweetness."},
+    {id:"generic",n:7,x:30,y:64,label:"Generic / Bland",desc:"Generic, quick finish, bland, thin",color:"#b8a840",fix:"Extract more — finer grind. Also increase dose for strength."},
+    {id:"watery_sour",n:8,x:22,y:78,label:"Watery / Sour",desc:"Watery, bitter, dry — poor extraction",color:"#c89040",fix:"Major extraction improvement needed — finer grind, better puck prep, check grinder."},
+    {id:"bitter_dry",n:9,x:72,y:64,label:"Bitter / Dry",desc:"Bitter, dry, powdery, empty",color:"#c87850",fix:"Increase yield (longer shot). Try coarser grind if shot ran very long."},
+    {id:"watery_bitter",n:10,x:80,y:78,label:"Watery / Bitter",desc:"Watery, bitter, over-extracted and weak",color:"#c86040",fix:"Coarser grind, decrease yield, increase dose. Shot is over-extracted and weak."},
   ];
-  const shape="25,5 95,5 75,95 5,95";
+  const shape="25,8 95,8 75,92 5,92";
   return<div className="compass-wrap">
     <div className="compass-title">Espresso Compass</div>
-    <div className="compass-sub">Tap the zone that matches your shot</div>
+    <div className="compass-sub">Tap a numbered zone that matches your shot</div>
     <div className="compass-axis"><span>Under-extracted</span><span>Balanced</span><span>Over-extracted</span></div>
     <div style={{position:"relative",margin:"4px 0"}}>
       <svg viewBox="0 0 100 100" style={{width:"100%",height:"auto",display:"block"}}>
         <defs>
           <clipPath id="cc"><polygon points={shape}/></clipPath>
           <linearGradient id="cg" x1="0%" y1="0%" x2="100%" y2="100%">
-            <stop offset="0%" stopColor="#c8c040" stopOpacity="0.5"/>
-            <stop offset="45%" stopColor="#70b870" stopOpacity="0.6"/>
-            <stop offset="100%" stopColor="#c86040" stopOpacity="0.5"/>
+            <stop offset="0%" stopColor="#c8c040" stopOpacity="0.45"/>
+            <stop offset="45%" stopColor="#70b870" stopOpacity="0.55"/>
+            <stop offset="100%" stopColor="#c86040" stopOpacity="0.45"/>
           </linearGradient>
         </defs>
         <polygon points={shape} fill="url(#cg)"/>
         <polygon points={shape} fill="none" stroke="#5a4a30" strokeWidth="0.8"/>
-        <line x1="33" y1="5" x2="13" y2="95" stroke="#3a2e22" strokeWidth="0.4" clipPath="url(#cc)"/>
-        <line x1="63" y1="5" x2="43" y2="95" stroke="#3a2e22" strokeWidth="0.4" clipPath="url(#cc)"/>
-        <line x1="25" y1="35" x2="95" y2="35" stroke="#3a2e22" strokeWidth="0.4" clipPath="url(#cc)"/>
-        <line x1="15" y1="65" x2="85" y2="65" stroke="#3a2e22" strokeWidth="0.4" clipPath="url(#cc)"/>
-        <text x="14" y="8" fontSize="3.5" fill="#d4aa7a" fontWeight="bold" textAnchor="middle">Decrease</text>
-        <text x="14" y="12" fontSize="3.5" fill="#d4aa7a" fontWeight="bold" textAnchor="middle">Yield ↙</text>
-        <text x="86" y="8" fontSize="3.5" fill="#d4aa7a" fontWeight="bold" textAnchor="middle">Improve</text>
-        <text x="86" y="12" fontSize="3.5" fill="#d4aa7a" fontWeight="bold" textAnchor="middle">Extraction ↘</text>
-        <text x="8" y="90" fontSize="3.5" fill="#9a8268" textAnchor="middle">Extract</text>
-        <text x="8" y="94" fontSize="3.5" fill="#9a8268" textAnchor="middle">Less ↗</text>
-        <text x="92" y="90" fontSize="3.5" fill="#9a8268" textAnchor="middle">Increase</text>
-        <text x="92" y="94" fontSize="3.5" fill="#9a8268" textAnchor="middle">Yield ↙</text>
+        <line x1="33" y1="8" x2="13" y2="92" stroke="#3a2e22" strokeWidth="0.4" clipPath="url(#cc)"/>
+        <line x1="63" y1="8" x2="43" y2="92" stroke="#3a2e22" strokeWidth="0.4" clipPath="url(#cc)"/>
+        <line x1="25" y1="36" x2="95" y2="36" stroke="#3a2e22" strokeWidth="0.4" clipPath="url(#cc)"/>
+        <line x1="15" y1="64" x2="85" y2="64" stroke="#3a2e22" strokeWidth="0.4" clipPath="url(#cc)"/>
         {zones.map(z=><g key={z.id} onClick={()=>onSelect(selected?.id===z.id?null:z)} style={{cursor:"pointer"}}>
-          <circle cx={z.x} cy={z.y} r={selected?.id===z.id?6.5:5} fill={z.color}
-            opacity={selected?.id===z.id?1:0.75}
-            stroke={selected?.id===z.id?"#fff":"rgba(0,0,0,0.3)"}
-            strokeWidth={selected?.id===z.id?1.5:0.5}
-            style={{transition:"all 0.2s"}}/>
-          <text x={z.x} y={z.y+8} textAnchor="middle" fontSize="3" fill="#f0e8dc" style={{pointerEvents:"none"}}>
-            {z.label.split("/")[0].split(" ")[0]}
+          <circle cx={z.x} cy={z.y} r={selected?.id===z.id?6:4.6} fill={z.color}
+            opacity={selected?.id===z.id?1:0.8}
+            stroke={selected?.id===z.id?"#fff":"rgba(0,0,0,0.35)"}
+            strokeWidth={selected?.id===z.id?1.3:0.5}
+            style={{transition:"all 0.15s"}}/>
+          <text x={z.x} y={z.y} textAnchor="middle" dominantBaseline="central" fontSize={selected?.id===z.id?5:4} fontWeight="700" fill="#1a1410" style={{pointerEvents:"none"}}>
+            {z.n}
           </text>
         </g>)}
       </svg>
     </div>
-    <div className="compass-axis"><span>Strong</span><span></span><span>Weak</span></div>
+    <div className="compass-axis"><span>Strong</span><span/><span>Weak</span></div>
+    <div className="compass-legend">
+      {zones.map(z=><button key={z.id} className={"compass-legend-item"+(selected?.id===z.id?" sel":"")} onClick={()=>onSelect(selected?.id===z.id?null:z)}>
+        <span className="compass-legend-dot" style={{background:z.color}}>{z.n}</span>{z.label}
+      </button>)}
+    </div>
     {selected&&<div className="compass-result">
       <div className="compass-result-label" style={{color:selected.color}}>{selected.label}</div>
       <div className="compass-result-desc">{selected.desc}</div>
@@ -691,7 +689,7 @@ Give me: dose, ${method==="espresso"?"yield, time, temp, pre-brew":"water amount
   return<div className="app">
     <style>{`
       :root{--bg:#1a1410;--bg2:#1f1812;--bg3:#241c10;--border:#3a2e22;--border2:#2e2418;--gold:#d4aa7a;--text:#f0e8dc;--text2:#c8b898;--text3:#a89578;--muted:#8a7358;--dim:#6a5540;--green:#90b878;--red:#c07878;--blue:#789ab8;--purple:#b8a0e0;}
-      .app{height:100vh;width:100%;overflow:hidden;background:var(--bg);color:var(--text);font-family:'DM Mono',monospace;display:flex;flex-direction:column;}
+      .app{height:100vh;height:100dvh;width:100%;overflow:hidden;background:var(--bg);color:var(--text);font-family:'DM Mono',monospace;display:flex;flex-direction:column;}
       .hdr{padding:13px 15px 11px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between;background:var(--bg2);flex-shrink:0;overflow:hidden;}
       .hdr-l{display:flex;align-items:center;gap:10px;min-width:0;}
       .back{font-size:26px;color:var(--gold);background:none;border:none;cursor:pointer;padding:0;flex-shrink:0;}
@@ -742,6 +740,7 @@ Give me: dose, ${method==="espresso"?"yield, time, temp, pre-brew":"water amount
       .bean-roaster-lbl{font-size:11px;color:var(--muted);letter-spacing:2px;text-transform:uppercase;margin-top:3px;}
       .bean-actions{display:flex;gap:6px;margin-top:10px;flex-wrap:wrap;}
       .roast-date{font-size:11px;color:var(--muted);margin-top:4px;display:flex;align-items:center;gap:6px;}
+      .roast-date-exact{color:var(--dim);}
       .fresh-badge{font-size:9px;letter-spacing:1px;text-transform:uppercase;padding:1px 6px;border:1px solid;border-radius:2px;}
       .pills{display:flex;gap:6px;flex-wrap:wrap;margin-top:8px;}
       .pill{font-size:10px;letter-spacing:1px;text-transform:uppercase;color:var(--text3);border:1px solid var(--border);padding:3px 8px;}
@@ -831,6 +830,10 @@ Give me: dose, ${method==="espresso"?"yield, time, temp, pre-brew":"water amount
       .compass-title{font-family:'Playfair Display',serif;font-size:17px;color:var(--gold);margin-bottom:2px;}
       .compass-sub{font-size:11px;color:var(--muted);margin-bottom:8px;}
       .compass-axis{display:flex;justify-content:space-between;font-size:10px;color:var(--dim);margin-bottom:2px;}
+      .compass-legend{display:grid;grid-template-columns:repeat(2,1fr);gap:4px 10px;margin-top:10px;}
+      .compass-legend-item{display:flex;align-items:center;gap:8px;background:transparent;border:1px solid transparent;color:var(--text3);font-family:'DM Mono',monospace;font-size:11px;padding:5px 6px;text-align:left;cursor:pointer;-webkit-tap-highlight-color:transparent;border-radius:2px;}
+      .compass-legend-item:active,.compass-legend-item.sel{background:var(--bg2);border-color:var(--border);color:var(--text);}
+      .compass-legend-dot{width:18px;height:18px;flex-shrink:0;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:700;color:#1a1410;}
       .compass-result{margin-top:10px;padding:10px;background:#1a1610;border:1px solid var(--border);}
       .compass-result-label{font-size:15px;font-weight:500;margin-bottom:3px;}
       .compass-result-desc{font-size:13px;color:var(--text3);margin-bottom:5px;}
@@ -883,12 +886,23 @@ Give me: dose, ${method==="espresso"?"yield, time, temp, pre-brew":"water amount
       .compare-notes{font-size:13px;color:var(--text3);margin-top:8px;line-height:1.6;}
 
       /* DISCOVERY */
-      .profile-bars{display:flex;flex-direction:column;gap:8px;}
-      .profile-row{display:flex;align-items:center;gap:10px;}
-      .profile-lbl{font-size:13px;color:var(--text3);width:110px;flex-shrink:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
-      .profile-bar-track{flex:1;height:6px;background:var(--border);border-radius:3px;overflow:hidden;}
-      .profile-bar-fill{height:100%;background:var(--gold);border-radius:3px;}
-      .profile-val{font-size:13px;color:var(--gold);width:26px;flex-shrink:0;text-align:right;}
+      .stat-row{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;}
+      .stat-box{background:var(--bg3);border:1px solid var(--border);padding:12px 8px;text-align:center;}
+      .stat-num{font-family:'Playfair Display',serif;font-size:22px;color:var(--gold);line-height:1.15;}
+      .stat-lbl{font-size:9px;letter-spacing:1px;text-transform:uppercase;color:var(--muted);margin-top:4px;}
+      .donut-wrap{display:flex;align-items:center;gap:16px;background:var(--bg3);border:1px solid var(--border);padding:14px;margin-bottom:16px;}
+      .donut-svg{width:90px;height:90px;flex-shrink:0;}
+      .donut-legend{flex:1;display:flex;flex-direction:column;gap:5px;min-width:0;}
+      .donut-legend-row{display:flex;align-items:center;gap:7px;font-size:12px;color:var(--text2);}
+      .donut-dot{width:9px;height:9px;border-radius:50%;flex-shrink:0;}
+      .donut-legend-lbl{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+      .donut-legend-n{color:var(--muted);font-size:11px;}
+      .rank-list{display:flex;flex-direction:column;gap:4px;}
+      .rank-row{display:flex;align-items:center;gap:10px;background:var(--bg3);border:1px solid var(--border);padding:9px 12px;}
+      .rank-num{font-family:'Playfair Display',serif;font-size:14px;color:var(--dim);width:16px;flex-shrink:0;}
+      .rank-lbl{flex:1;font-size:13px;color:var(--text2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+      .rank-n{font-size:10px;color:var(--muted);flex-shrink:0;}
+      .rank-avg{font-size:12px;color:var(--gold);flex-shrink:0;width:28px;text-align:right;}
 
       /* KIOSK */
       .kiosk-view{position:fixed;inset:0;background:var(--bg);z-index:70;overflow-y:auto;padding:24px;}
@@ -1029,7 +1043,7 @@ Give me: dose, ${method==="espresso"?"yield, time, temp, pre-brew":"water amount
             <div className="bean-hero-content">
               <div className="bean-title">{cur.name}</div>
               <div className="bean-roaster-lbl">{cur.roaster}</div>
-              {cur.roastDate&&<div className="roast-date">{daysAgo(cur.roastDate)||cur.roastDate}{freshness(cur.roastDate)&&<span className="fresh-badge" style={{color:freshness(cur.roastDate).color,borderColor:freshness(cur.roastDate).color}}>{freshness(cur.roastDate).label}</span>}</div>}
+              {cur.roastDate&&<div className="roast-date">{daysAgo(cur.roastDate)||fmtDate(cur.roastDate)}{daysAgo(cur.roastDate)&&<span className="roast-date-exact"> · {fmtDate(cur.roastDate)}</span>}{freshness(cur.roastDate)&&<span className="fresh-badge" style={{color:freshness(cur.roastDate).color,borderColor:freshness(cur.roastDate).color}}>{freshness(cur.roastDate).label}</span>}</div>}
               <div className="bean-actions">
                 <button className="btn sm" style={{borderColor:cur.inStock!==false?"#3a5a28":"#5a2a2a",color:cur.inStock!==false?"var(--green)":"var(--red)"}} onClick={()=>updB("inStock",cur.inStock===false)}>
                   {cur.inStock!==false?"✓ In Stock":"✗ Out of Stock"}
@@ -1245,31 +1259,70 @@ Give me: dose, ${method==="espresso"?"yield, time, temp, pre-brew":"water amount
     {screen==="discovery"&&<div className="screen-body">
       <div className="tc">
         <div className="sec-lbl" style={{marginBottom:6}}>Your Taste Profile</div>
-        <div className="sec-txt" style={{marginBottom:14,fontSize:12}}>AI analysis of your ratings plus a visual breakdown by process and origin.</div>
+        <div className="sec-txt" style={{marginBottom:14,fontSize:12}}>A snapshot of what you've tried and what you tend to love.</div>
         {(()=>{
           const rated=beans.filter(b=>b.rating>0);
-          const groupBy=(field)=>{
+          const totalTried=beans.length+awayLog.length;
+          const avgRating=rated.length?(rated.reduce((s,b)=>s+b.rating,0)/rated.length):null;
+          const topBean=[...rated].sort((a,b)=>b.rating-a.rating)[0];
+          const groupBy=(items,field)=>{
             const map={};
-            rated.forEach(b=>{const key=(b[field]&&b[field].trim())||"Unknown";map[key]=map[key]||{sum:0,n:0};map[key].sum+=b.rating;map[key].n++;});
-            return Object.entries(map).map(([k,v])=>({k,avg:v.sum/v.n,n:v.n})).sort((a,b)=>b.avg-a.avg);
+            items.forEach(b=>{const key=(b[field]&&b[field].trim())||"Unknown";map[key]=map[key]||{sum:0,n:0};map[key].sum+=(b.rating||0);map[key].n++;});
+            return Object.entries(map).map(([k,v])=>({k,avg:v.n?v.sum/v.n:0,n:v.n})).sort((a,b)=>b.n-a.n);
           };
-          const originRows=groupBy("origin");
-          const procRows=groupBy("process");
-          const roastRows=groupBy("roast");
-          const Bars=({rows})=><div className="profile-bars">
-            {rows.map(row=><div key={row.k} className="profile-row">
-              <span className="profile-lbl">{row.k} ({row.n})</span>
-              <div className="profile-bar-track"><div className="profile-bar-fill" style={{width:(row.avg*10)+"%"}}/></div>
-              <span className="profile-val">{row.avg.toFixed(1)}</span>
-            </div>)}
+          const allTried=[...beans,...awayLog.map(a=>({origin:a.origin,process:a.process,roast:a.roast,rating:a.rating||0}))];
+          const originRows=groupBy(allTried,"origin").slice(0,6);
+          const procRows=groupBy(allTried,"process").slice(0,6);
+          const roastRows=groupBy(allTried,"roast").slice(0,6);
+          const palette=["#d4aa7a","#90b878","#789ab8","#c07878","#b8a0e0","#c8c040"];
+
+          const DonutChart=({rows})=>{
+            const total=rows.reduce((s,r)=>s+r.n,0)||1;
+            let cumulative=0;
+            const R=15.9,C=2*Math.PI*R;
+            return<div className="donut-wrap">
+              <svg viewBox="0 0 36 36" className="donut-svg">
+                <circle cx="18" cy="18" r={R} fill="none" stroke="var(--border)" strokeWidth="4"/>
+                {rows.map((r,i)=>{
+                  const frac=r.n/total;
+                  const dash=frac*C;
+                  const gap=C-dash;
+                  const offset=-cumulative*C;
+                  cumulative+=frac;
+                  return<circle key={r.k} cx="18" cy="18" r={R} fill="none" stroke={palette[i%palette.length]} strokeWidth="4" strokeDasharray={`${dash} ${gap}`} strokeDashoffset={offset} transform="rotate(-90 18 18)"/>;
+                })}
+              </svg>
+              <div className="donut-legend">
+                {rows.map((r,i)=><div key={r.k} className="donut-legend-row"><span className="donut-dot" style={{background:palette[i%palette.length]}}/><span className="donut-legend-lbl">{r.k}</span><span className="donut-legend-n">{r.n}</span></div>)}
+              </div>
+            </div>;
+          };
+
+          const TopRated=({rows,title})=><div style={{marginBottom:16}}>
+            <div className="sec-lbl" style={{marginBottom:8}}>{title}</div>
+            {rows.length===0?<div className="empty-grind">Not enough data yet</div>:
+              <div className="rank-list">
+                {rows.slice(0,5).map((r,i)=><div key={r.k} className="rank-row">
+                  <span className="rank-num">{i+1}</span>
+                  <span className="rank-lbl">{r.k}</span>
+                  <span className="rank-n">{r.n} tried</span>
+                  {r.avg>0&&<span className="rank-avg">{r.avg.toFixed(1)}</span>}
+                </div>)}
+              </div>}
           </div>;
-          return rated.length===0?<div className="empty-grind">Rate a few beans to see your profile</div>:<>
-            <div className="sec-lbl" style={{marginBottom:8}}>By Origin</div>
-            <Bars rows={originRows}/>
-            <div className="sec-lbl" style={{marginBottom:8,marginTop:16}}>By Process</div>
-            <Bars rows={procRows}/>
-            <div className="sec-lbl" style={{marginBottom:8,marginTop:16}}>By Roast Level</div>
-            <Bars rows={roastRows}/>
+
+          return<>
+            <div className="stat-row">
+              <div className="stat-box"><div className="stat-num">{totalTried}</div><div className="stat-lbl">Beans Tried</div></div>
+              <div className="stat-box"><div className="stat-num">{avgRating?avgRating.toFixed(1):"—"}</div><div className="stat-lbl">Avg Rating</div></div>
+              <div className="stat-box"><div className="stat-num" style={{fontSize:13,lineHeight:1.3}}>{topBean?topBean.name:"—"}</div><div className="stat-lbl">Top Rated</div></div>
+            </div>
+            {rated.length===0?<div className="empty-grind" style={{marginTop:14}}>Rate a few beans to see your profile</div>:<>
+              <div className="sec-lbl" style={{marginBottom:8,marginTop:18}}>Origin Mix</div>
+              <DonutChart rows={originRows}/>
+              <TopRated rows={procRows} title="Top Processes"/>
+              <TopRated rows={roastRows} title="Top Roast Levels"/>
+            </>}
           </>;
         })()}
         <div className="div"/>
