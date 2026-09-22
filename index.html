@@ -41,7 +41,7 @@ const BLOOM_T=["20","25","30","35","40","45","50","60"].map(v=>({value:v,label:v
 
 // ── STORAGE ────────────────────────────────────────────────────────────────
 function migrate(b){
-  return{roastDate:"",imageUrl:"",imageBase64:"",imagePosition:50,imageZoom:100,rating:0,altitude:"",varietal:"",flavorProfile:"",inStock:true,currentlyBrewing:false,savedRecipes:{aeropress:[],pourover:[]},...b,
+  return{roastDate:"",imageUrl:"",imageBase64:"",imageOffsetX:50,imageOffsetY:50,imageZoom:100,rating:0,altitude:"",varietal:"",flavorProfile:"",inStock:true,currentlyBrewing:false,savedRecipes:{aeropress:[],pourover:[]},...b,
     methods:{espresso:{...DEF.espresso,...(b.methods?.espresso||{})},aeropress:{...DEF.aeropress,...(b.methods?.aeropress||{})},pourover:{...DEF.pourover,...(b.methods?.pourover||{})}},
     grindLogs:{espresso:b.grindLogs?.espresso||[],aeropress:b.grindLogs?.aeropress||[],pourover:b.grindLogs?.pourover||[]},
     savedRecipes:b.savedRecipes||{aeropress:[],pourover:[]}};
@@ -131,6 +131,52 @@ function Toggle({label,value,onChange}){
 }
 function Sel({label,value,onChange,options}){
   return<div className="field"><label>{label}</label><select value={value} onChange={e=>onChange(e.target.value)} className="sel-input">{options.map(o=><option key={o.value||o} value={o.value||o}>{o.label||o}</option>)}</select></div>;
+}
+
+// Drag-to-pan, pinch/wheel-to-zoom crop frame. Position is stored as % offsets (0-100) of the
+// image's own top-left within the frame, zoom as a scale multiplier — both saved on the bean.
+function ImageCropBox({src,posX,posY,zoom,onChange}){
+  const frameRef=useRef(null);
+  const dragRef=useRef(null);
+  const px=posX??50,py=posY??50,z=zoom??100;
+
+  const clampAndSet=(nx,ny,nz)=>{
+    const cx=Math.max(0,Math.min(100,nx));
+    const cy=Math.max(0,Math.min(100,ny));
+    const cz=Math.max(100,Math.min(300,nz));
+    onChange({posX:cx,posY:cy,zoom:cz});
+  };
+
+  const startDrag=(clientX,clientY)=>{dragRef.current={startX:clientX,startY:clientY,origX:px,origY:py};};
+  const moveDrag=(clientX,clientY)=>{
+    if(!dragRef.current||!frameRef.current)return;
+    const rect=frameRef.current.getBoundingClientRect();
+    const dxPct=((clientX-dragRef.current.startX)/rect.width)*100;
+    const dyPct=((clientY-dragRef.current.startY)/rect.height)*100;
+    // Dragging the image right should reveal more of the left side, so invert.
+    clampAndSet(dragRef.current.origX-dxPct,dragRef.current.origY-dyPct,z);
+  };
+  const endDrag=()=>{dragRef.current=null;};
+
+  return<div className="crop-box-wrap">
+    <div ref={frameRef} className="crop-box-frame"
+      onMouseDown={e=>{e.preventDefault();startDrag(e.clientX,e.clientY);}}
+      onMouseMove={e=>moveDrag(e.clientX,e.clientY)}
+      onMouseUp={endDrag} onMouseLeave={endDrag}
+      onTouchStart={e=>{const t=e.touches[0];startDrag(t.clientX,t.clientY);}}
+      onTouchMove={e=>{const t=e.touches[0];moveDrag(t.clientX,t.clientY);}}
+      onTouchEnd={endDrag}
+      onWheel={e=>{e.preventDefault();clampAndSet(px,py,z+(e.deltaY<0?8:-8));}}
+    >
+      <img src={src} alt="Crop preview" draggable={false} style={{objectPosition:`${px}% ${py}%`,transform:`scale(${z/100})`}} onError={ev=>ev.target.style.opacity=0.15}/>
+      <div className="crop-box-hint">Drag to reposition</div>
+    </div>
+    <div className="crop-box-zoom-row">
+      <span className="crop-box-zoom-lbl">Zoom</span>
+      <input type="range" min="100" max="300" value={z} onChange={e=>clampAndSet(px,py,parseInt(e.target.value))} className="img-adjust-slider"/>
+      <button className="btn sm" onClick={()=>clampAndSet(50,50,100)}>Reset</button>
+    </div>
+  </div>;
 }
 
 function GrindSelector({value,onChange}){
@@ -322,9 +368,6 @@ function EditForm({draft,setDraft,method,updDraftM,adding,saveNew,saveEdit,setAd
       <div className="field full"><Field label="Flavor Profile" value={draft.flavorProfile||""} onChange={v=>setDraft(d=>({...d,flavorProfile:v}))} placeholder="e.g. Blueberry, chocolate"/></div>
       <div className="field full">
         <label>Bag Image</label>
-        {(draft.imageBase64||draft.imageUrl)&&<div className="img-adjust-preview">
-          <img src={draft.imageBase64||draft.imageUrl} alt="Bag preview" style={{objectPosition:`center ${draft.imagePosition||50}%`,transform:`scale(${(draft.imageZoom||100)/100})`}} onError={e=>e.target.style.opacity=0.2}/>
-        </div>}
         <input value={draft.imageUrl||""} onChange={e=>setDraft(d=>({...d,imageUrl:e.target.value,imageBase64:""}))} placeholder="https://roaster.com/image.jpg"/>
         <div style={{fontSize:9,color:"var(--muted)",margin:"4px 0 8px"}}>Paste a URL, or upload a photo directly if the roaster's URL doesn't load</div>
         <label className="btn sm image-upload-btn">
@@ -332,10 +375,8 @@ function EditForm({draft,setDraft,method,updDraftM,adding,saveNew,saveEdit,setAd
           <input type="file" accept="image/*" style={{display:"none"}} onChange={e=>{const f=e.target.files?.[0];if(!f)return;const r=new FileReader();r.onload=ev=>setDraft(d=>({...d,imageBase64:ev.target.result,imageUrl:""}));r.readAsDataURL(f);}}/>
         </label>
         {(draft.imageBase64||draft.imageUrl)&&<div style={{marginTop:10}}>
-          <div style={{fontSize:9,letterSpacing:1,textTransform:"uppercase",color:"var(--muted)",marginBottom:3}}>Vertical Position</div>
-          <input type="range" min="0" max="100" value={draft.imagePosition||50} onChange={e=>setDraft(d=>({...d,imagePosition:e.target.value}))} className="img-adjust-slider"/>
-          <div style={{fontSize:9,letterSpacing:1,textTransform:"uppercase",color:"var(--muted)",margin:"8px 0 3px"}}>Zoom</div>
-          <input type="range" min="100" max="200" value={draft.imageZoom||100} onChange={e=>setDraft(d=>({...d,imageZoom:e.target.value}))} className="img-adjust-slider"/>
+          <ImageCropBox src={draft.imageBase64||draft.imageUrl} posX={draft.imageOffsetX} posY={draft.imageOffsetY} zoom={draft.imageZoom}
+            onChange={({posX,posY,zoom})=>setDraft(d=>({...d,imageOffsetX:posX,imageOffsetY:posY,imageZoom:zoom}))}/>
         </div>}
       </div>
     </div>
@@ -704,7 +745,7 @@ Give me: dose, ${method==="espresso"?"yield, time, temp, pre-brew":"water amount
   return<div className="app">
     <style>{`
       :root{--bg:#1a1410;--bg2:#1f1812;--bg3:#241c10;--border:#3a2e22;--border2:#2e2418;--gold:#d4aa7a;--text:#f0e8dc;--text2:#c8b898;--text3:#a89578;--muted:#8a7358;--dim:#6a5540;--green:#90b878;--red:#c07878;--blue:#789ab8;--purple:#b8a0e0;}
-      .app{height:100%;width:100%;overflow:hidden;background:var(--bg);color:var(--text);font-family:'DM Mono',monospace;display:flex;flex-direction:column;min-height:0;}
+      .app{flex:1;min-height:0;width:100%;overflow:hidden;background:var(--bg);color:var(--text);font-family:'DM Mono',monospace;display:flex;flex-direction:column;}
       .hdr{padding:13px 15px 11px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between;background:var(--bg2);flex-shrink:0;overflow:hidden;}
       .hdr-l{display:flex;align-items:center;gap:10px;min-width:0;}
       .back{font-size:26px;color:var(--gold);background:none;border:none;cursor:pointer;padding:0;flex-shrink:0;}
@@ -750,11 +791,16 @@ Give me: dose, ${method==="espresso"?"yield, time, temp, pre-brew":"water amount
       .detail{flex:1;min-width:0;min-height:0;overflow-y:auto;overflow-x:hidden;-webkit-overflow-scrolling:touch;display:flex;flex-direction:column;}
       .bean-hero{background:var(--bg2);border-bottom:1px solid var(--border);flex-shrink:0;}
       .bean-hero-img{width:100%;height:130px;object-fit:cover;opacity:0.65;display:block;}
-      .img-adjust-preview{width:100%;height:120px;overflow:hidden;background:var(--bg3);border:1px solid var(--border);margin-bottom:8px;}
-      .img-adjust-preview img{width:100%;height:100%;object-fit:cover;display:block;}
       .img-adjust-slider{-webkit-appearance:none;appearance:none;width:100%;height:3px;background:var(--border);outline:none;border-radius:2px;}
       .img-adjust-slider::-webkit-slider-thumb{-webkit-appearance:none;width:16px;height:16px;border-radius:50%;background:var(--gold);cursor:pointer;}
       .image-upload-btn{display:inline-block;cursor:pointer;-webkit-tap-highlight-color:transparent;margin-top:4px;}
+      .crop-box-wrap{margin-top:4px;}
+      .crop-box-frame{position:relative;width:100%;height:150px;overflow:hidden;background:var(--bg3);border:1px solid var(--gold);cursor:grab;touch-action:none;user-select:none;}
+      .crop-box-frame:active{cursor:grabbing;}
+      .crop-box-frame img{width:100%;height:100%;object-fit:cover;display:block;pointer-events:none;}
+      .crop-box-hint{position:absolute;bottom:6px;right:8px;font-size:9px;letter-spacing:0.5px;color:rgba(240,232,220,0.85);background:rgba(0,0,0,0.5);padding:3px 7px;pointer-events:none;}
+      .crop-box-zoom-row{display:flex;align-items:center;gap:10px;margin-top:8px;}
+      .crop-box-zoom-lbl{font-size:9px;letter-spacing:1px;text-transform:uppercase;color:var(--muted);flex-shrink:0;}
       .bean-hero-content{padding:14px 16px 12px;overflow:hidden;}
       .bean-title{font-family:'Playfair Display',serif;font-size:24px;color:var(--gold);line-height:1.1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
       .bean-roaster-lbl{font-size:11px;color:var(--muted);letter-spacing:2px;text-transform:uppercase;margin-top:3px;}
@@ -1059,7 +1105,7 @@ Give me: dose, ${method==="espresso"?"yield, time, temp, pre-brew":"water amount
         {!cur&&<div className="empty" style={{paddingTop:80}}>← Select a bean</div>}
         {cur&&<>
           <div className="bean-hero">
-            {imgUrl&&<img src={imgUrl} alt={cur.name} className="bean-hero-img" style={{objectPosition:`center ${cur.imagePosition||50}%`,transform:`scale(${(cur.imageZoom||100)/100})`}} onError={e=>e.target.style.display="none"}/>}
+            {imgUrl&&<img src={imgUrl} alt={cur.name} className="bean-hero-img" style={{objectPosition:`${cur.imageOffsetX??50}% ${cur.imageOffsetY??50}%`,transform:`scale(${(cur.imageZoom||100)/100})`}} onError={e=>e.target.style.display="none"}/>}
             <div className="bean-hero-content">
               <div className="bean-title">{cur.name}</div>
               <div className="bean-roaster-lbl">{cur.roaster}</div>
