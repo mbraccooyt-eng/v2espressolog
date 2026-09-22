@@ -9,7 +9,7 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.2/babel.min.js"></script>
-<style>*,*::before,*::after{box-sizing:border-box;margin:0;padding:0;}html,body{background:#1a1410;height:100%;height:100dvh;width:100%;overflow:hidden;-webkit-text-size-adjust:100%;position:fixed;inset:0;}#root{height:100%;}</style>
+<style>*,*::before,*::after{box-sizing:border-box;margin:0;padding:0;}html,body{background:#1a1410;height:100%;width:100%;overflow:hidden;-webkit-text-size-adjust:100%;position:fixed;inset:0;}#root{height:100vh;height:100dvh;width:100vw;overflow:hidden;display:flex;flex-direction:column;}</style>
 </head>
 <body>
 <div id="root"></div>
@@ -41,7 +41,7 @@ const BLOOM_T=["20","25","30","35","40","45","50","60"].map(v=>({value:v,label:v
 
 // ── STORAGE ────────────────────────────────────────────────────────────────
 function migrate(b){
-  return{roastDate:"",imageUrl:"",imageBase64:"",rating:0,altitude:"",varietal:"",flavorProfile:"",inStock:true,currentlyBrewing:false,savedRecipes:{aeropress:[],pourover:[]},...b,
+  return{roastDate:"",imageUrl:"",imageBase64:"",imagePosition:50,imageZoom:100,rating:0,altitude:"",varietal:"",flavorProfile:"",inStock:true,currentlyBrewing:false,savedRecipes:{aeropress:[],pourover:[]},...b,
     methods:{espresso:{...DEF.espresso,...(b.methods?.espresso||{})},aeropress:{...DEF.aeropress,...(b.methods?.aeropress||{})},pourover:{...DEF.pourover,...(b.methods?.pourover||{})}},
     grindLogs:{espresso:b.grindLogs?.espresso||[],aeropress:b.grindLogs?.aeropress||[],pourover:b.grindLogs?.pourover||[]},
     savedRecipes:b.savedRecipes||{aeropress:[],pourover:[]}};
@@ -321,9 +321,22 @@ function EditForm({draft,setDraft,method,updDraftM,adding,saveNew,saveEdit,setAd
       <div className="field full"><Field label="Varietal" value={draft.varietal||""} onChange={v=>setDraft(d=>({...d,varietal:v}))} placeholder="e.g. Bourbon, Gesha"/></div>
       <div className="field full"><Field label="Flavor Profile" value={draft.flavorProfile||""} onChange={v=>setDraft(d=>({...d,flavorProfile:v}))} placeholder="e.g. Blueberry, chocolate"/></div>
       <div className="field full">
-        <label>Bag Image URL</label>
-        <input value={draft.imageUrl||""} onChange={e=>setDraft(d=>({...d,imageUrl:e.target.value}))} placeholder="https://roaster.com/image.jpg"/>
-        <div style={{fontSize:9,color:"var(--muted)",marginTop:4}}>Paste image URL from roaster website for a persistent photo</div>
+        <label>Bag Image</label>
+        {(draft.imageBase64||draft.imageUrl)&&<div className="img-adjust-preview">
+          <img src={draft.imageBase64||draft.imageUrl} alt="Bag preview" style={{objectPosition:`center ${draft.imagePosition||50}%`,transform:`scale(${(draft.imageZoom||100)/100})`}} onError={e=>e.target.style.opacity=0.2}/>
+        </div>}
+        <input value={draft.imageUrl||""} onChange={e=>setDraft(d=>({...d,imageUrl:e.target.value,imageBase64:""}))} placeholder="https://roaster.com/image.jpg"/>
+        <div style={{fontSize:9,color:"var(--muted)",margin:"4px 0 8px"}}>Paste a URL, or upload a photo directly if the roaster's URL doesn't load</div>
+        <label className="btn sm image-upload-btn">
+          Upload Photo
+          <input type="file" accept="image/*" style={{display:"none"}} onChange={e=>{const f=e.target.files?.[0];if(!f)return;const r=new FileReader();r.onload=ev=>setDraft(d=>({...d,imageBase64:ev.target.result,imageUrl:""}));r.readAsDataURL(f);}}/>
+        </label>
+        {(draft.imageBase64||draft.imageUrl)&&<div style={{marginTop:10}}>
+          <div style={{fontSize:9,letterSpacing:1,textTransform:"uppercase",color:"var(--muted)",marginBottom:3}}>Vertical Position</div>
+          <input type="range" min="0" max="100" value={draft.imagePosition||50} onChange={e=>setDraft(d=>({...d,imagePosition:e.target.value}))} className="img-adjust-slider"/>
+          <div style={{fontSize:9,letterSpacing:1,textTransform:"uppercase",color:"var(--muted)",margin:"8px 0 3px"}}>Zoom</div>
+          <input type="range" min="100" max="200" value={draft.imageZoom||100} onChange={e=>setDraft(d=>({...d,imageZoom:e.target.value}))} className="img-adjust-slider"/>
+        </div>}
       </div>
     </div>
     <div className="div"/>
@@ -532,13 +545,15 @@ function App(){
     reader.onload=async(ev)=>{
       const dataUrl=ev.target.result;
       setCapturedPhoto(dataUrl);
+      // Use the scanned bag photo as the bean's image right away — no separate upload step needed.
+      setDraft(d=>({...d,imageBase64:dataUrl,imageUrl:""}));
       setPhotoLoading(true);setPhotoImport(null);
       const r=await callClaudeVision(
         "You read coffee bag labels and extract structured info. Return ONLY valid JSON, no markdown, no explanation.",
         `Read this coffee bag label/photo and extract as much as you can identify. Leave a field as empty string "" if not visible or not stated on the bag. Return JSON exactly in this shape:\n{"roaster":"","name":"","origin":"","process":"","roast":"","altitude":"","varietal":"","flavorProfile":"","roastDate":""}\nFor roast, use one of: Light, Light-Medium, Medium, Medium-Dark, Dark — infer from any roast description if not explicit. For roastDate, use YYYY-MM-DD format if a date is visible, else leave empty.`,
         dataUrl,true
       );
-      if(r){setDraft(d=>({...d,...r}));setPhotoImport(r);}
+      if(r){setDraft(d=>({...d,...r,imageBase64:dataUrl,imageUrl:""}));setPhotoImport(r);}
       else setPhotoImport({error:"Couldn't read the label clearly. Try a closer, well-lit photo, or fill in manually."});
       setPhotoLoading(false);
     };
@@ -689,7 +704,7 @@ Give me: dose, ${method==="espresso"?"yield, time, temp, pre-brew":"water amount
   return<div className="app">
     <style>{`
       :root{--bg:#1a1410;--bg2:#1f1812;--bg3:#241c10;--border:#3a2e22;--border2:#2e2418;--gold:#d4aa7a;--text:#f0e8dc;--text2:#c8b898;--text3:#a89578;--muted:#8a7358;--dim:#6a5540;--green:#90b878;--red:#c07878;--blue:#789ab8;--purple:#b8a0e0;}
-      .app{height:100vh;height:100dvh;width:100%;overflow:hidden;background:var(--bg);color:var(--text);font-family:'DM Mono',monospace;display:flex;flex-direction:column;}
+      .app{height:100%;width:100%;overflow:hidden;background:var(--bg);color:var(--text);font-family:'DM Mono',monospace;display:flex;flex-direction:column;min-height:0;}
       .hdr{padding:13px 15px 11px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between;background:var(--bg2);flex-shrink:0;overflow:hidden;}
       .hdr-l{display:flex;align-items:center;gap:10px;min-width:0;}
       .back{font-size:26px;color:var(--gold);background:none;border:none;cursor:pointer;padding:0;flex-shrink:0;}
@@ -732,9 +747,14 @@ Give me: dose, ${method==="espresso"?"yield, time, temp, pre-brew":"water amount
       .bc-rating{font-size:12px;color:var(--gold);margin-top:2px;}
       .bc-arrow{color:var(--dim);font-size:18px;flex-shrink:0;}
       .list-footer{padding:12px 16px;border-top:1px solid var(--border2);background:var(--bg2);flex-shrink:0;}
-      .detail{flex:1;min-width:0;overflow-y:auto;overflow-x:hidden;-webkit-overflow-scrolling:touch;display:flex;flex-direction:column;}
+      .detail{flex:1;min-width:0;min-height:0;overflow-y:auto;overflow-x:hidden;-webkit-overflow-scrolling:touch;display:flex;flex-direction:column;}
       .bean-hero{background:var(--bg2);border-bottom:1px solid var(--border);flex-shrink:0;}
       .bean-hero-img{width:100%;height:130px;object-fit:cover;opacity:0.65;display:block;}
+      .img-adjust-preview{width:100%;height:120px;overflow:hidden;background:var(--bg3);border:1px solid var(--border);margin-bottom:8px;}
+      .img-adjust-preview img{width:100%;height:100%;object-fit:cover;display:block;}
+      .img-adjust-slider{-webkit-appearance:none;appearance:none;width:100%;height:3px;background:var(--border);outline:none;border-radius:2px;}
+      .img-adjust-slider::-webkit-slider-thumb{-webkit-appearance:none;width:16px;height:16px;border-radius:50%;background:var(--gold);cursor:pointer;}
+      .image-upload-btn{display:inline-block;cursor:pointer;-webkit-tap-highlight-color:transparent;margin-top:4px;}
       .bean-hero-content{padding:14px 16px 12px;overflow:hidden;}
       .bean-title{font-family:'Playfair Display',serif;font-size:24px;color:var(--gold);line-height:1.1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
       .bean-roaster-lbl{font-size:11px;color:var(--muted);letter-spacing:2px;text-transform:uppercase;margin-top:3px;}
@@ -870,7 +890,7 @@ Give me: dose, ${method==="espresso"?"yield, time, temp, pre-brew":"water amount
       .screen-nav::-webkit-scrollbar{display:none;}
       .screen-tab{font-family:'DM Mono',monospace;font-size:11px;letter-spacing:1.5px;text-transform:uppercase;padding:10px 14px;color:var(--muted);border-bottom:2px solid transparent;margin-bottom:-1px;cursor:pointer;white-space:nowrap;flex-shrink:0;border:none;background:none;-webkit-tap-highlight-color:transparent;}
       .screen-tab.active{color:var(--gold);border-bottom-color:var(--gold);}
-      .screen-body{flex:1;overflow-y:auto;overflow-x:hidden;-webkit-overflow-scrolling:touch;width:100%;}
+      .screen-body{flex:1;min-height:0;overflow-y:auto;overflow-x:hidden;-webkit-overflow-scrolling:touch;width:100%;}
 
       /* COMPARE */
       .compare-picker{display:flex;flex-wrap:wrap;gap:6px;}
@@ -1002,7 +1022,7 @@ Give me: dose, ${method==="espresso"?"yield, time, temp, pre-brew":"water amount
           <div className="sec-txt" style={{marginBottom:10,fontSize:12}}>Take or upload a photo of the bag — roaster, origin, process, roast, and notes get read automatically.</div>
           <label className="btn ai photo-scan-btn">
             📷 Take Photo / Upload
-            <input type="file" accept="image/*" capture="environment" style={{display:"none"}} onChange={handleBagPhoto}/>
+            <input type="file" accept="image/*" style={{display:"none"}} onChange={handleBagPhoto}/>
           </label>
           {capturedPhoto&&<img src={capturedPhoto} alt="Scanned bag" className="photo-preview-img"/>}
           {photoLoading&&<div className="ai-loading" style={{marginTop:10}}><div className="ai-dot"/><div className="ai-dot"/><div className="ai-dot"/></div>}
@@ -1039,7 +1059,7 @@ Give me: dose, ${method==="espresso"?"yield, time, temp, pre-brew":"water amount
         {!cur&&<div className="empty" style={{paddingTop:80}}>← Select a bean</div>}
         {cur&&<>
           <div className="bean-hero">
-            {imgUrl&&<img src={imgUrl} alt={cur.name} className="bean-hero-img" onError={e=>e.target.style.display="none"}/>}
+            {imgUrl&&<img src={imgUrl} alt={cur.name} className="bean-hero-img" style={{objectPosition:`center ${cur.imagePosition||50}%`,transform:`scale(${(cur.imageZoom||100)/100})`}} onError={e=>e.target.style.display="none"}/>}
             <div className="bean-hero-content">
               <div className="bean-title">{cur.name}</div>
               <div className="bean-roaster-lbl">{cur.roaster}</div>
@@ -1216,7 +1236,7 @@ Give me: dose, ${method==="espresso"?"yield, time, temp, pre-brew":"water amount
                 {cur.flavorProfile&&<div className="pm w"><div className="pm-lbl">Flavor Profile</div><div className="pm-val sm">{cur.flavorProfile}</div></div>}
               </div>}
               <div className="div"/>
-              <BeanInfoSheet bean={cur}/>
+              <BeanInfoSheet key={cur.id} bean={cur}/>
             </>}
           </div>
         </>}
@@ -1261,19 +1281,23 @@ Give me: dose, ${method==="espresso"?"yield, time, temp, pre-brew":"water amount
         <div className="sec-lbl" style={{marginBottom:6}}>Your Taste Profile</div>
         <div className="sec-txt" style={{marginBottom:14,fontSize:12}}>A snapshot of what you've tried and what you tend to love.</div>
         {(()=>{
-          const rated=beans.filter(b=>b.rating>0);
+          const ratedBeans=beans.filter(b=>b.rating>0).map(b=>({name:b.name,rating:b.rating}));
+          const ratedAway=awayLog.filter(a=>a.rating>0).map(a=>({name:a.name,rating:a.rating}));
+          const allRated=[...ratedBeans,...ratedAway];
           const totalTried=beans.length+awayLog.length;
-          const avgRating=rated.length?(rated.reduce((s,b)=>s+b.rating,0)/rated.length):null;
-          const topBean=[...rated].sort((a,b)=>b.rating-a.rating)[0];
-          const groupBy=(items,field)=>{
+          const avgRating=allRated.length?(allRated.reduce((s,b)=>s+b.rating,0)/allRated.length):null;
+          const topBean=[...allRated].sort((a,b)=>b.rating-a.rating)[0];
+          const groupBy=(items,field,sortByRating)=>{
             const map={};
-            items.forEach(b=>{const key=(b[field]&&b[field].trim())||"Unknown";map[key]=map[key]||{sum:0,n:0};map[key].sum+=(b.rating||0);map[key].n++;});
-            return Object.entries(map).map(([k,v])=>({k,avg:v.n?v.sum/v.n:0,n:v.n})).sort((a,b)=>b.n-a.n);
+            items.forEach(b=>{const key=(b[field]&&b[field].trim())||"Unknown";map[key]=map[key]||{sum:0,n:0,rated:0};map[key].sum+=(b.rating||0);map[key].n++;if(b.rating>0)map[key].rated++;});
+            const rows=Object.entries(map).map(([k,v])=>({k,avg:v.rated?v.sum/v.rated:0,n:v.n}));
+            return sortByRating?rows.sort((a,b)=>b.avg-a.avg||b.n-a.n):rows.sort((a,b)=>b.n-a.n);
           };
+          // Tasting Log entries count toward the profile too, even before a bag is bought.
           const allTried=[...beans,...awayLog.map(a=>({origin:a.origin,process:a.process,roast:a.roast,rating:a.rating||0}))];
-          const originRows=groupBy(allTried,"origin").slice(0,6);
-          const procRows=groupBy(allTried,"process").slice(0,6);
-          const roastRows=groupBy(allTried,"roast").slice(0,6);
+          const originRows=groupBy(allTried,"origin",false).slice(0,6);
+          const procRows=groupBy(allTried,"process",true).slice(0,6);
+          const roastRows=groupBy(allTried,"roast",true).slice(0,6);
           const palette=["#d4aa7a","#90b878","#789ab8","#c07878","#b8a0e0","#c8c040"];
 
           const DonutChart=({rows})=>{
@@ -1317,7 +1341,7 @@ Give me: dose, ${method==="espresso"?"yield, time, temp, pre-brew":"water amount
               <div className="stat-box"><div className="stat-num">{avgRating?avgRating.toFixed(1):"—"}</div><div className="stat-lbl">Avg Rating</div></div>
               <div className="stat-box"><div className="stat-num" style={{fontSize:13,lineHeight:1.3}}>{topBean?topBean.name:"—"}</div><div className="stat-lbl">Top Rated</div></div>
             </div>
-            {rated.length===0?<div className="empty-grind" style={{marginTop:14}}>Rate a few beans to see your profile</div>:<>
+            {allRated.length===0?<div className="empty-grind" style={{marginTop:14}}>Rate a few beans to see your profile</div>:<>
               <div className="sec-lbl" style={{marginBottom:8,marginTop:18}}>Origin Mix</div>
               <DonutChart rows={originRows}/>
               <TopRated rows={procRows} title="Top Processes"/>
@@ -1344,7 +1368,7 @@ Give me: dose, ${method==="espresso"?"yield, time, temp, pre-brew":"water amount
           <div className="sec-lbl" style={{marginBottom:8}}>Scan Bag or Menu</div>
           <label className="btn ai photo-scan-btn">
             📷 Take Photo / Upload
-            <input type="file" accept="image/*" capture="environment" style={{display:"none"}} onChange={handleAwayPhoto}/>
+            <input type="file" accept="image/*" style={{display:"none"}} onChange={handleAwayPhoto}/>
           </label>
           {awayCapturedPhoto&&<img src={awayCapturedPhoto} alt="Scanned label" className="photo-preview-img"/>}
           {awayPhotoLoading&&<div className="ai-loading" style={{marginTop:10}}><div className="ai-dot"/><div className="ai-dot"/><div className="ai-dot"/></div>}
