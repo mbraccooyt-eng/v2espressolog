@@ -751,7 +751,7 @@ Give me: dose, ${method==="espresso"?"yield, time, temp, pre-brew":"water amount
     <style>{`
       :root{--bg:#1a1410;--bg2:#1f1812;--bg3:#241c10;--border:#3a2e22;--border2:#2e2418;--gold:#d4aa7a;--text:#f0e8dc;--text2:#c8b898;--text3:#a89578;--muted:#8a7358;--dim:#6a5540;--green:#90b878;--red:#c07878;--blue:#789ab8;--purple:#b8a0e0;}
       .app{flex:1;min-height:0;width:100%;overflow:hidden;background:var(--bg);color:var(--text);font-family:'DM Mono',monospace;display:flex;flex-direction:column;}
-      .hdr{padding:13px 15px 11px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between;background:var(--bg2);flex-shrink:0;overflow:hidden;}
+      .hdr{padding:13px 15px 11px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between;background:var(--bg2);flex-shrink:0;overflow-x:hidden;overflow-y:visible;position:relative;z-index:5;}
       .hdr-l{display:flex;align-items:center;gap:10px;min-width:0;}
       .back{font-size:26px;color:var(--gold);background:none;border:none;cursor:pointer;padding:0;flex-shrink:0;}
       .hdr h1{font-family:'Playfair Display',serif;font-size:22px;font-weight:400;color:var(--gold);white-space:nowrap;}
