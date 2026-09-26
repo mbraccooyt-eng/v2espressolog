@@ -29,7 +29,7 @@ const DEF={
   pourover:{dose:"20",water:"300",temp:"205",bloomAmount:"40",bloomTime:"45",pours:"",totalTime:"3:30",notes:"",whatWorked:"",whatDidnt:""},
 };
 const ROAST_OPTS=["Light","Light-Medium","Medium","Medium-Dark","Dark"];
-const PROCESS_OPTS=["Washed","Natural","Honey","Anaerobic","Co-ferment","Washed co-ferment & washed","Wet-hulled","Other"];
+const PROCESS_OPTS=["Washed","Natural","Honey","Anaerobic","Co-ferment","Washed co-ferment & washed","Wet-hulled","Mixed","Other"];
 const TEMPS=["195","195.5","196","196.5","197","197.5","198","198.5","199","199.5","200","200.5","201","201.5","202","202.5","203","204","205","206","207","208"].map(v=>({value:v,label:v+"°F"}));
 const DOSES_ESP=["15","16","17","17.5","18","18.5","19","19.5","20"].map(v=>({value:v,label:v+"g"}));
 const DOSES_MAN=["12","13","14","15","16","17","18","19","20","21","22"].map(v=>({value:v,label:v+"g"}));
@@ -41,7 +41,7 @@ const BLOOM_T=["20","25","30","35","40","45","50","60"].map(v=>({value:v,label:v
 
 // ── STORAGE ────────────────────────────────────────────────────────────────
 function migrate(b){
-  return{roastDate:"",imageUrl:"",imageBase64:"",imageOffsetX:50,imageOffsetY:50,imageZoom:100,rating:0,altitude:"",varietal:"",flavorProfile:"",inStock:true,currentlyBrewing:false,savedRecipes:{aeropress:[],pourover:[]},...b,
+  return{roastDate:"",imageUrl:"",imageBase64:"",imageOffsetX:50,imageOffsetY:50,imageZoom:100,rating:0,altitude:"",varietal:"",flavorProfile:"",inStock:true,currentlyBrewing:false,frozen:false,savedRecipes:{aeropress:[],pourover:[]},...b,
     methods:{espresso:{...DEF.espresso,...(b.methods?.espresso||{})},aeropress:{...DEF.aeropress,...(b.methods?.aeropress||{})},pourover:{...DEF.pourover,...(b.methods?.pourover||{})}},
     grindLogs:{espresso:b.grindLogs?.espresso||[],aeropress:b.grindLogs?.aeropress||[],pourover:b.grindLogs?.pourover||[]},
     savedRecipes:b.savedRecipes||{aeropress:[],pourover:[]}};
@@ -64,8 +64,25 @@ function grindLabel(pos){if(!pos)return"—";if(pos.dot===0)return String(pos.wh
 function daysAgo(s){if(!s)return null;const d=new Date(s);if(isNaN(d))return null;const n=Math.floor((Date.now()-d.getTime())/86400000);return n===0?"Today":n===1?"1 day ago":n+" days ago";}
 function daysAgoNum(s){if(!s)return null;const d=new Date(s);if(isNaN(d))return null;return Math.floor((Date.now()-d.getTime())/86400000);}
 function fmtDate(s){if(!s)return"";const d=new Date(s+(s.length<=10?"T00:00:00":""));if(isNaN(d))return s;const mm=String(d.getMonth()+1).padStart(2,"0"),dd=String(d.getDate()).padStart(2,"0"),yy=String(d.getFullYear()).slice(-2);return`${mm}/${dd}/${yy}`;}
-function freshness(s){const n=daysAgoNum(s);if(n===null)return null;if(n<5)return{label:"Too Fresh",color:"var(--blue)"};if(n<=30)return{label:"Peak",color:"var(--green)"};if(n<=45)return{label:"Aging",color:"var(--gold)"};return{label:"Past Peak",color:"var(--red)"};}
+function freshness(s,frozen){if(frozen)return{label:"Frozen",color:"var(--blue)"};const n=daysAgoNum(s);if(n===null)return null;if(n<5)return{label:"Too Fresh",color:"var(--blue)"};if(n<=30)return{label:"Peak",color:"var(--green)"};if(n<=45)return{label:"Aging",color:"var(--gold)"};return{label:"Past Peak",color:"var(--red)"};}
 function cleanMd(t){if(!t)return"";return t.replace(/^#{1,6}\s+/gm,"").replace(/\*\*(.+?)\*\*/g,"$1").replace(/\*(.+?)\*/g,"$1").replace(/^-{3,}\s*$/gm,"").replace(/^[-*]\s+/gm,"• ").trim();}
+// Converts ALL CAPS or all-lowercase bag text into normal Title Case, but leaves already-mixed-case
+// text alone (so a name someone typed deliberately, like "iPhone"-style branding, isn't mangled).
+const TITLECASE_SMALL_WORDS=new Set(["a","an","and","as","at","but","by","de","del","el","for","in","la","le","of","on","or","the","to","van","von"]);
+function titleCase(s){
+  if(!s)return s;
+  const isShouty=s===s.toUpperCase()&&/[A-Z]/.test(s);
+  const isFlat=s===s.toLowerCase()&&/[a-z]/.test(s);
+  if(!isShouty&&!isFlat)return s; // already has intentional mixed case — leave it
+  const words=s.toLowerCase().split(" ");
+  return words.map((w,i)=>{
+    if(!w)return w;
+    if(i>0&&TITLECASE_SMALL_WORDS.has(w))return w;
+    // Keep short all-caps tokens that look like acronyms/codes intact (e.g. "X64", "V60")
+    if(/^[a-z]*\d/.test(w)||/^\d/.test(w))return w.toUpperCase();
+    return w.charAt(0).toUpperCase()+w.slice(1);
+  }).join(" ");
+}
 
 // ── AI ─────────────────────────────────────────────────────────────────────
 async function callClaude(system,user,json){
@@ -266,24 +283,52 @@ function TimerModal({stages,onClose}){
   </div>;
 }
 
-function Compass({onSelect,selected}){
-  const zones=[
-    {id:"overwhelming",n:1,x:22,y:16,label:"Overwhelming",desc:"Sour, salty, overwhelming intensity",color:"#c8b840",fix:"Decrease yield. Improve puck prep and distribution evenness."},
-    {id:"intense_sour",n:2,x:32,y:30,label:"Intense / Sour",desc:"Intense, sour, salty, strong",color:"#c8c040",fix:"Improve extraction evenness — better distribution. Finer grind only if shot was fast."},
-    {id:"substantial",n:3,x:42,y:44,label:"Substantial",desc:"Substantial, strong, slightly under-extracted",color:"#a8c060",fix:"Finer grind or improve distribution to increase extraction."},
-    {id:"sweet_spot",n:4,x:55,y:40,label:"Sweet Spot ✓",desc:"Sweet, balanced, rich, luscious, fruity",color:"#70b870",fix:"Dialed in — note these settings carefully."},
-    {id:"balanced",n:5,x:46,y:58,label:"Balanced",desc:"Balanced, ripe, tasty",color:"#80b868",fix:"Very close. Minor grind adjustment may refine further."},
-    {id:"nuanced",n:6,x:64,y:52,label:"Nuanced",desc:"Nuanced, fluffy, creamy, delicate",color:"#78b878",fix:"Increase yield slightly for more body while keeping sweetness."},
-    {id:"generic",n:7,x:30,y:64,label:"Generic / Bland",desc:"Generic, quick finish, bland, thin",color:"#b8a840",fix:"Extract more — finer grind. Also increase dose for strength."},
-    {id:"watery_sour",n:8,x:22,y:78,label:"Watery / Sour",desc:"Watery, bitter, dry — poor extraction",color:"#c89040",fix:"Major extraction improvement needed — finer grind, better puck prep, check grinder."},
-    {id:"bitter_dry",n:9,x:72,y:64,label:"Bitter / Dry",desc:"Bitter, dry, powdery, empty",color:"#c87850",fix:"Increase yield (longer shot). Try coarser grind if shot ran very long."},
-    {id:"watery_bitter",n:10,x:80,y:78,label:"Watery / Bitter",desc:"Watery, bitter, over-extracted and weak",color:"#c86040",fix:"Coarser grind, decrease yield, increase dose. Shot is over-extracted and weak."},
-  ];
+const ESPRESSO_ZONES=[
+  {id:"overwhelming",n:1,x:22,y:16,label:"Overwhelming",desc:"Sour, salty, overwhelming intensity",color:"#c8b840",fix:"Decrease yield. Improve puck prep and distribution evenness."},
+  {id:"intense_sour",n:2,x:32,y:30,label:"Intense / Sour",desc:"Intense, sour, salty, strong",color:"#c8c040",fix:"Improve extraction evenness — better distribution. Finer grind only if shot was fast."},
+  {id:"substantial",n:3,x:42,y:44,label:"Substantial",desc:"Substantial, strong, slightly under-extracted",color:"#a8c060",fix:"Finer grind or improve distribution to increase extraction."},
+  {id:"sweet_spot",n:4,x:55,y:40,label:"Sweet Spot ✓",desc:"Sweet, balanced, rich, luscious, fruity",color:"#70b870",fix:"Dialed in — note these settings carefully."},
+  {id:"balanced",n:5,x:46,y:58,label:"Balanced",desc:"Balanced, ripe, tasty",color:"#80b868",fix:"Very close. Minor grind adjustment may refine further."},
+  {id:"nuanced",n:6,x:64,y:52,label:"Nuanced",desc:"Nuanced, fluffy, creamy, delicate",color:"#78b878",fix:"Increase yield slightly for more body while keeping sweetness."},
+  {id:"generic",n:7,x:30,y:64,label:"Generic / Bland",desc:"Generic, quick finish, bland, thin",color:"#b8a840",fix:"Extract more — finer grind. Also increase dose for strength."},
+  {id:"watery_sour",n:8,x:22,y:78,label:"Watery / Sour",desc:"Watery, bitter, dry — poor extraction",color:"#c89040",fix:"Major extraction improvement needed — finer grind, better puck prep, check grinder."},
+  {id:"bitter_dry",n:9,x:72,y:64,label:"Bitter / Dry",desc:"Bitter, dry, powdery, empty",color:"#c87850",fix:"Increase yield (longer shot). Try coarser grind if shot ran very long."},
+  {id:"watery_bitter",n:10,x:80,y:78,label:"Watery / Bitter",desc:"Watery, bitter, over-extracted and weak",color:"#c86040",fix:"Coarser grind, decrease yield, increase dose. Shot is over-extracted and weak."},
+];
+// AeroPress is full immersion — the main levers are steep time, grind, and press technique rather
+// than pressure/pre-infusion, so the zones and fixes are written around those instead.
+const AEROPRESS_ZONES=[
+  {id:"harsh_muddy",n:1,x:24,y:20,label:"Harsh / Muddy",desc:"Muddy, over-extracted, harsh bitterness",color:"#c87850",fix:"Shorten steep time, grind coarser, or press faster/softer."},
+  {id:"bitter",n:2,x:38,y:32,label:"Bitter",desc:"Bitter, dry finish, some body",color:"#c8a050",fix:"Grind slightly coarser or cut steep time by 10-15s."},
+  {id:"rich",n:3,x:50,y:42,label:"Rich",desc:"Rich, full body, good sweetness",color:"#a8c060",fix:"Close — small grind tweak to taste."},
+  {id:"sweet_spot",n:4,x:58,y:52,label:"Sweet Spot ✓",desc:"Balanced, sweet, clean, full flavor",color:"#70b870",fix:"Dialed in — note this recipe."},
+  {id:"clean_light",n:5,x:68,y:44,label:"Clean & Light",desc:"Clean, delicate, tea-like",color:"#78b878",fix:"Increase dose or steep slightly longer for more body."},
+  {id:"thin",n:6,x:30,y:60,label:"Thin",desc:"Watery, underdeveloped, lacking sweetness",color:"#b8a840",fix:"Grind finer, extend steep time, or increase dose."},
+  {id:"sour",n:7,x:20,y:72,label:"Sour",desc:"Sour, sharp, underextracted",color:"#c89040",fix:"Grind finer and/or extend steep time."},
+  {id:"flat",n:8,x:44,y:74,label:"Flat",desc:"Flat, low intensity, little character",color:"#9a9070",fix:"Check water temp — likely too low. Increase dose."},
+  {id:"astringent",n:9,x:72,y:68,label:"Astringent",desc:"Drying, papery, unpleasant aftertaste",color:"#a87850",fix:"Press more gently and stop at the hiss — avoid squeezing hard."},
+  {id:"over_diluted",n:10,x:60,y:80,label:"Over-diluted",desc:"Weak, washed out despite decent flavor",color:"#8a9878",fix:"Reduce water or increase dose for a stronger ratio."},
+];
+// Pour over extraction is governed by pour technique, bloom, and total time more than pressure.
+const POUROVER_ZONES=[
+  {id:"channeled_harsh",n:1,x:22,y:18,label:"Channeled / Harsh",desc:"Uneven, harsh, some sour and bitter together",color:"#c8b840",fix:"Pour slower and more evenly in circles — likely channeling, not a grind issue."},
+  {id:"bitter_heavy",n:2,x:36,y:30,label:"Bitter & Heavy",desc:"Heavy, bitter, over-extracted",color:"#c8a050",fix:"Grind coarser or shorten total brew time."},
+  {id:"rich_full",n:3,x:48,y:42,label:"Rich & Full",desc:"Full body, good sweetness, slightly heavy",color:"#a8c060",fix:"Slightly coarser grind or faster pours for more clarity."},
+  {id:"sweet_spot",n:4,x:58,y:48,label:"Sweet Spot ✓",desc:"Balanced, clean, sweet, expressive",color:"#70b870",fix:"Dialed in — note this recipe."},
+  {id:"bright_clean",n:5,x:68,y:38,label:"Bright & Clean",desc:"Bright, clean, delicate florals/fruit",color:"#78b878",fix:"Great as-is, or slow pours slightly for more body."},
+  {id:"weak_thin",n:6,x:28,y:60,label:"Weak & Thin",desc:"Thin body, underdeveloped flavor",color:"#b8a840",fix:"Grind finer or slow down your pour rate."},
+  {id:"sour_fast",n:7,x:18,y:74,label:"Sour & Fast",desc:"Sour, drains too quickly, underextracted",color:"#c89040",fix:"Grind finer — drain time is too fast for full extraction."},
+  {id:"flat_dull",n:8,x:44,y:76,label:"Flat / Dull",desc:"Muted, little aroma or brightness",color:"#9a9070",fix:"Check bloom — make sure all grounds are saturated. Try fresher water temp."},
+  {id:"astringent_dry",n:9,x:72,y:66,label:"Astringent",desc:"Drying, tannic, papery aftertaste",color:"#a87850",fix:"Reduce agitation, pour more gently, avoid disturbing the bed too much."},
+  {id:"stalled_bitter",n:10,x:60,y:82,label:"Stalled / Bitter",desc:"Slow drain, bitter, possibly clogged bed",color:"#8a9878",fix:"Grind coarser — bed is too fine and choking the flow."},
+];
+
+function Compass({onSelect,selected,zones,title,subtitle,axisTop,axisBottom}){
   const shape="25,8 95,8 75,92 5,92";
   return<div className="compass-wrap">
-    <div className="compass-title">Espresso Compass</div>
-    <div className="compass-sub">Tap a numbered zone that matches your shot</div>
-    <div className="compass-axis"><span>Under-extracted</span><span>Balanced</span><span>Over-extracted</span></div>
+    <div className="compass-title">{title||"Espresso Compass"}</div>
+    <div className="compass-sub">{subtitle||"Tap a numbered zone that matches your shot"}</div>
+    <div className="compass-axis"><span>{(axisTop&&axisTop[0])||"Under-extracted"}</span><span>{(axisTop&&axisTop[1])||"Balanced"}</span><span>{(axisTop&&axisTop[2])||"Over-extracted"}</span></div>
     <div style={{position:"relative",margin:"4px 0"}}>
       <svg viewBox="0 0 100 100" style={{width:"100%",height:"auto",display:"block"}}>
         <defs>
@@ -312,7 +357,7 @@ function Compass({onSelect,selected}){
         </g>)}
       </svg>
     </div>
-    <div className="compass-axis"><span>Strong</span><span/><span>Weak</span></div>
+    <div className="compass-axis"><span>{(axisBottom&&axisBottom[0])||"Strong"}</span><span/><span>{(axisBottom&&axisBottom[1])||"Weak"}</span></div>
     <div className="compass-legend">
       {zones.map(z=><button key={z.id} className={"compass-legend-item"+(selected?.id===z.id?" sel":"")} onClick={()=>onSelect(selected?.id===z.id?null:z)}>
         <span className="compass-legend-dot" style={{background:z.color}}>{z.n}</span>{z.label}
@@ -471,13 +516,18 @@ function App(){
   const[addingAway,setAddingAway]=useState(false);
   const[awayDraft,setAwayDraft]=useState({name:"",roaster:"",place:"",method:"",origin:"",process:"",roast:"",flavorProfile:"",notes:"",rating:0,date:""});
   const[compareIds,setCompareIds]=useState([]);
+  const[compareLoading,setCompareLoading]=useState(false);
+  const[compareResult,setCompareResult]=useState("");
   const[discoveryLoading,setDiscoveryLoading]=useState(false);
   const[startPointLoading,setStartPointLoading]=useState(false);
   const[startPointResult,setStartPointResult]=useState({});
   const[discoveryResult,setDiscoveryResult]=useState("");
+  const[discoveryDrill,setDiscoveryDrill]=useState(null);
   const[kioskMode,setKioskMode]=useState(false);
 
-  useEffect(()=>{const chk=()=>setIsMobile(window.innerWidth<680);chk();window.addEventListener("resize",chk);return()=>window.removeEventListener("resize",chk);},[]);
+  // Use the smaller viewport dimension, not just width, so a phone rotated to landscape
+  // (wide but still short) doesn't get mistaken for a desktop/tablet layout.
+  useEffect(()=>{const chk=()=>setIsMobile(Math.min(window.innerWidth,window.innerHeight)<680);chk();window.addEventListener("resize",chk);window.addEventListener("orientationchange",chk);return()=>{window.removeEventListener("resize",chk);window.removeEventListener("orientationchange",chk);};},[]);
   useEffect(()=>{saveBeans(beans);},[beans]);
   useEffect(()=>{try{const k=localStorage.getItem("coffeeLog_apikey");if(k)window._COFFEE_API_KEY=k;}catch(e){}},[]);
   useEffect(()=>{saveAwayLog(awayLog);},[awayLog]);
@@ -578,7 +628,7 @@ function App(){
     }catch(e){setImportStatus("Error: "+e.message);}
   };
 
-  const importUrl=async()=>{if(!urlInput.trim())return;setUrlLoading(true);setUrlImport(null);const r=await callClaude("Extract coffee bean info from URL. Return ONLY valid JSON, no markdown.",`URL:${urlInput}\nReturn JSON:{"roaster":"","name":"","origin":"","process":"","roast":"","altitude":"","varietal":"","flavorProfile":"","imageUrl":""}`,true);if(r)setDraft(d=>({...d,...r}));setUrlImport(r||{error:"Couldn't parse URL."});setUrlLoading(false);};
+  const importUrl=async()=>{if(!urlInput.trim())return;setUrlLoading(true);setUrlImport(null);const r=await callClaude("Extract coffee bean info from URL. Return ONLY valid JSON, no markdown.",`URL:${urlInput}\nReturn JSON:{"roaster":"","name":"","origin":"","process":"","roast":"","altitude":"","varietal":"","flavorProfile":"","imageUrl":""}`,true);if(r)setDraft(d=>({...d,...r,name:titleCase(r.name),roaster:titleCase(r.roaster)}));setUrlImport(r||{error:"Couldn't parse URL."});setUrlLoading(false);};
 
   const handleBagPhoto=(e)=>{
     const file=e.target.files?.[0];
@@ -595,7 +645,7 @@ function App(){
         `Read this coffee bag label/photo and extract as much as you can identify. Leave a field as empty string "" if not visible or not stated on the bag. Return JSON exactly in this shape:\n{"roaster":"","name":"","origin":"","process":"","roast":"","altitude":"","varietal":"","flavorProfile":"","roastDate":""}\nFor roast, use one of: Light, Light-Medium, Medium, Medium-Dark, Dark — infer from any roast description if not explicit. For roastDate, use YYYY-MM-DD format if a date is visible, else leave empty.`,
         dataUrl,true
       );
-      if(r){setDraft(d=>({...d,...r,imageBase64:dataUrl,imageUrl:""}));setPhotoImport(r);}
+      if(r){setDraft(d=>({...d,...r,name:titleCase(r.name),roaster:titleCase(r.roaster),imageBase64:dataUrl,imageUrl:""}));setPhotoImport(r);}
       else setPhotoImport({error:"Couldn't read the label clearly. Try a closer, well-lit photo, or fill in manually."});
       setPhotoLoading(false);
     };
@@ -700,6 +750,17 @@ function App(){
     const r=await callClaude("You are a coffee taste profile analyst. Be specific and concise.",
       `Based on this person's rated coffees, identify patterns in what they like and dislike, then suggest 3-4 specific varietals, processes, or origins they should seek out next, with brief reasoning.\n\nHOME COLLECTION:\n${rated||"none yet"}\n\nTRIED ELSEWHERE:\n${away||"none yet"}\n\nGive: 1) A short taste profile summary (2-3 sentences), 2) A bulleted list of what to try next with 1-line reasoning each.`);
     setDiscoveryResult(r);setDiscoveryLoading(false);
+  };
+
+  const runCompareAI=async(compBeans)=>{
+    setCompareLoading(true);setCompareResult("");
+    const describe=b=>{
+      const e=b.methods.espresso;
+      return`${b.name} by ${b.roaster}. Origin: ${b.origin||"unknown"}. Process: ${b.process||"unknown"}. Roast: ${b.roast||"unknown"}.${b.altitude?" Altitude: "+b.altitude+".":""}${b.flavorProfile?" Flavor: "+b.flavorProfile+".":""} Rating: ${b.rating||"not rated"}/10. Espresso dialed at ${e.dose}g→${e.yield}g/${e.time}s/${e.temp}°F.${e.notes?" Tasting notes: "+e.notes:""}`;
+    };
+    const r=await callClaude("You are a coffee expert comparing two or more beans for someone deciding what to brew next. Be specific, reference the actual differences, keep it tight.",
+      `Compare these coffees and tell me: 1) the key differences that would actually affect flavor/brewing, 2) which one fits which mood or method better, 3) a one-line recommendation for right now.\n\n${compBeans.map((b,i)=>`Bean ${i+1}: ${describe(b)}`).join("\n\n")}`);
+    setCompareResult(r);setCompareLoading(false);
   };
 
   const startPointKey=cur?cur.id+"_"+method:"";
@@ -842,7 +903,8 @@ Give me: dose, ${method==="espresso"?"yield, time, temp, pre-brew":"water amount
       .pm-val.sm{font-size:14px;}
       .pm-unit{font-size:11px;color:var(--muted);margin-left:2px;}
       .param-dd{position:absolute;top:100%;left:0;right:0;background:var(--bg2);border:1px solid var(--gold);z-index:50;padding:8px;box-shadow:0 8px 24px rgba(0,0,0,.8);}
-      .export-menu{position:absolute;top:100%;right:0;margin-top:6px;background:var(--bg2);border:1px solid var(--gold);z-index:50;min-width:200px;box-shadow:0 8px 24px rgba(0,0,0,.8);}
+      .export-menu-backdrop{position:fixed;inset:0;z-index:49;background:transparent;}
+      .export-menu{position:fixed;top:52px;right:15px;background:var(--bg2);border:1px solid var(--gold);z-index:50;min-width:200px;box-shadow:0 8px 24px rgba(0,0,0,.8);}
       .export-menu-item{display:flex;flex-direction:column;align-items:flex-start;width:100%;background:transparent;border:none;border-bottom:1px solid var(--border);color:var(--text2);font-family:'DM Mono',monospace;font-size:12px;padding:10px 12px;text-align:left;cursor:pointer;-webkit-tap-highlight-color:transparent;}
       .export-menu-item:last-child{border-bottom:none;}
       .export-menu-item:active{background:var(--bg3);color:var(--gold);}
@@ -957,6 +1019,8 @@ Give me: dose, ${method==="espresso"?"yield, time, temp, pre-brew":"water amount
       .compare-name{font-family:'Playfair Display',serif;font-size:18px;color:var(--gold);}
       .compare-roaster{font-size:11px;color:var(--muted);margin-bottom:8px;}
       .compare-row{display:flex;justify-content:space-between;gap:8px;font-size:13px;color:var(--text2);padding:4px 0;border-bottom:1px solid var(--border2);}
+      .compare-row.diff{background:rgba(212,170,122,0.1);margin:0 -6px;padding:4px 6px;border-bottom-color:var(--gold);}
+      .compare-row.diff span:last-child{color:var(--gold);font-weight:600;}
       .compare-row span:first-child{color:var(--muted);flex-shrink:0;}
       .compare-row span:last-child{text-align:right;overflow-wrap:anywhere;}
       .compare-notes{font-size:13px;color:var(--text3);margin-top:8px;line-height:1.6;}
@@ -969,12 +1033,14 @@ Give me: dose, ${method==="espresso"?"yield, time, temp, pre-brew":"water amount
       .donut-wrap{display:flex;align-items:center;gap:16px;background:var(--bg3);border:1px solid var(--border);padding:14px;margin-bottom:16px;}
       .donut-svg{width:90px;height:90px;flex-shrink:0;}
       .donut-legend{flex:1;display:flex;flex-direction:column;gap:5px;min-width:0;}
-      .donut-legend-row{display:flex;align-items:center;gap:7px;font-size:12px;color:var(--text2);}
+      .donut-legend-row{display:flex;align-items:center;gap:7px;font-size:12px;color:var(--text2);background:transparent;border:none;padding:2px 0;width:100%;text-align:left;cursor:pointer;-webkit-tap-highlight-color:transparent;font-family:'DM Mono',monospace;}
+      .donut-legend-row:active{opacity:0.7;}
       .donut-dot{width:9px;height:9px;border-radius:50%;flex-shrink:0;}
       .donut-legend-lbl{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
       .donut-legend-n{color:var(--muted);font-size:11px;}
       .rank-list{display:flex;flex-direction:column;gap:4px;}
-      .rank-row{display:flex;align-items:center;gap:10px;background:var(--bg3);border:1px solid var(--border);padding:9px 12px;}
+      .rank-row{display:flex;align-items:center;gap:10px;background:var(--bg3);border:1px solid var(--border);padding:9px 12px;width:100%;text-align:left;cursor:pointer;-webkit-tap-highlight-color:transparent;font-family:'DM Mono',monospace;}
+      .rank-row:active{border-color:var(--gold);}
       .rank-num{font-family:'Playfair Display',serif;font-size:14px;color:var(--dim);width:16px;flex-shrink:0;}
       .rank-lbl{flex:1;font-size:13px;color:var(--text2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
       .rank-n{font-size:10px;color:var(--muted);flex-shrink:0;}
@@ -995,7 +1061,7 @@ Give me: dose, ${method==="espresso"?"yield, time, temp, pre-brew":"water amount
       .kiosk-card-meta{font-size:12px;color:var(--text3);margin-top:6px;}
       .kiosk-card-flavor{font-size:13px;color:var(--text2);margin-top:6px;font-style:italic;}
 
-      @media(min-width:680px){
+      @media(min-width:680px) and (min-height:680px){
         .back{display:none!important;}
         .bc-arrow{display:none!important;}
         .list-wrap{width:220px;border-right:1px solid var(--border);}
@@ -1017,14 +1083,17 @@ Give me: dose, ${method==="espresso"?"yield, time, temp, pre-brew":"water amount
         {screen==="beans"&&<button className="btn sm" onClick={()=>setShowImportModal(true)}>Import</button>}
         {screen==="beans"&&<div style={{position:"relative"}}>
           <button className="btn sm" onClick={()=>setShowExportMenu(v=>!v)}>{copied?"✓":"Export"}</button>
-          {showExportMenu&&<div className="export-menu">
-            <button className="export-menu-item" onClick={()=>{exportText(true);setShowExportMenu(false);}}>
-              <span>Share (Text)</span><span className="export-menu-sub">No images — safe to paste anywhere</span>
-            </button>
-            <button className="export-menu-item" onClick={()=>{exportText(false);setShowExportMenu(false);}}>
-              <span>Full Backup</span><span className="export-menu-sub">Everything, images included — larger</span>
-            </button>
-          </div>}
+          {showExportMenu&&<>
+            <div className="export-menu-backdrop" onClick={()=>setShowExportMenu(false)}/>
+            <div className="export-menu">
+              <button className="export-menu-item" onClick={()=>{exportText(true);setShowExportMenu(false);}}>
+                <span>Share (Text)</span><span className="export-menu-sub">No images — safe to paste anywhere</span>
+              </button>
+              <button className="export-menu-item" onClick={()=>{exportText(false);setShowExportMenu(false);}}>
+                <span>Full Backup</span><span className="export-menu-sub">Everything, images included — larger</span>
+              </button>
+            </div>
+          </>}
         </div>}
         <button className="btn icon kiosk-toggle-btn" onClick={()=>setKioskMode(k=>!k)} title="Display Mode">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -1065,11 +1134,11 @@ Give me: dose, ${method==="espresso"?"yield, time, temp, pre-brew":"water amount
               <div className="bc-body">
                 <div className="bc-name">{b.name}</div>
                 <div className="bc-roaster">{b.roaster}</div>
-                <div className="bc-meta">{b.roast}{da?" · "+da:""}{eg?" · esp "+grindLabel(eg.position):""}</div>
+                <div className="bc-meta">{b.origin?b.origin+" · ":""}{b.roast}{da?" · "+da:""}{eg?" · esp "+grindLabel(eg.position):""}</div>
                 <div className="bc-badges">
                   {b.currentlyBrewing&&<span className="bc-badge brewing">Brewing Now</span>}
                   {out&&<span className="bc-badge out">Out of Stock</span>}
-                  {!out&&freshness(b.roastDate)&&freshness(b.roastDate).label!=="Peak"&&<span className="bc-badge" style={{color:freshness(b.roastDate).color,borderColor:freshness(b.roastDate).color,background:"transparent"}}>{freshness(b.roastDate).label}</span>}
+                  {!out&&freshness(b.roastDate,b.frozen)&&freshness(b.roastDate,b.frozen).label!=="Peak"&&<span className="bc-badge" style={{color:freshness(b.roastDate,b.frozen).color,borderColor:freshness(b.roastDate,b.frozen).color,background:"transparent"}}>{freshness(b.roastDate,b.frozen).label}</span>}
                 </div>
                 {b.rating>0&&<div className="bc-rating">{"★".repeat(Math.round(b.rating/2))} {b.rating}/10</div>}
               </div>
@@ -1129,13 +1198,16 @@ Give me: dose, ${method==="espresso"?"yield, time, temp, pre-brew":"water amount
             <div className="bean-hero-content">
               <div className="bean-title">{cur.name}</div>
               <div className="bean-roaster-lbl">{cur.roaster}</div>
-              {cur.roastDate&&<div className="roast-date">{daysAgo(cur.roastDate)||fmtDate(cur.roastDate)}{daysAgo(cur.roastDate)&&<span className="roast-date-exact"> · {fmtDate(cur.roastDate)}</span>}{freshness(cur.roastDate)&&<span className="fresh-badge" style={{color:freshness(cur.roastDate).color,borderColor:freshness(cur.roastDate).color}}>{freshness(cur.roastDate).label}</span>}</div>}
+              {cur.roastDate&&<div className="roast-date">{daysAgo(cur.roastDate)||fmtDate(cur.roastDate)}{daysAgo(cur.roastDate)&&<span className="roast-date-exact"> · {fmtDate(cur.roastDate)}</span>}{freshness(cur.roastDate,cur.frozen)&&<span className="fresh-badge" style={{color:freshness(cur.roastDate,cur.frozen).color,borderColor:freshness(cur.roastDate,cur.frozen).color}}>{freshness(cur.roastDate,cur.frozen).label}</span>}</div>}
               <div className="bean-actions">
                 <button className="btn sm" style={{borderColor:cur.inStock!==false?"#3a5a28":"#5a2a2a",color:cur.inStock!==false?"var(--green)":"var(--red)"}} onClick={()=>updB("inStock",cur.inStock===false)}>
                   {cur.inStock!==false?"✓ In Stock":"✗ Out of Stock"}
                 </button>
                 <button className="btn sm" style={{borderColor:"#3a4a6a",color:"var(--blue)",background:cur.currentlyBrewing?"#1a2038":"transparent"}} onClick={()=>upd(bs=>bs.map(b=>({...b,currentlyBrewing:b.id===selId?!cur.currentlyBrewing:(!cur.currentlyBrewing?false:b.currentlyBrewing)})))}>
                   {cur.currentlyBrewing?"☕ Brewing Now":"Set as Current"}
+                </button>
+                <button className="btn sm" style={{borderColor:"#3a5a7a",color:"var(--blue)",background:cur.frozen?"#1a2838":"transparent"}} onClick={()=>updB("frozen",!cur.frozen)}>
+                  {cur.frozen?"❄ Frozen":"Mark Frozen"}
                 </button>
               </div>
               <div className="pills">
@@ -1276,11 +1348,17 @@ Give me: dose, ${method==="espresso"?"yield, time, temp, pre-brew":"water amount
             </>}
 
             {tab==="diagnose"&&<>
-              <Compass onSelect={setCompass} selected={compass}/>
-              <div className="diag-row">
+              <Compass onSelect={setCompass} selected={compass}
+                zones={method==="espresso"?ESPRESSO_ZONES:method==="aeropress"?AEROPRESS_ZONES:POUROVER_ZONES}
+                title={method==="espresso"?"Espresso Compass":method==="aeropress"?"AeroPress Compass":"Pour Over Compass"}
+                subtitle="Tap a numbered zone that matches your cup"
+                axisTop={method==="espresso"?["Under-extracted","Balanced","Over-extracted"]:method==="aeropress"?["Under-extracted","Balanced","Over-extracted"]:["Fast / Under","Balanced","Slow / Over"]}
+                axisBottom={method==="espresso"?["Strong","Weak"]:["Full Body","Thin"]}
+              />
+              {method==="espresso"&&<div className="diag-row">
                 <div><span className="diag-label">Shot Time (s)</span><input className="diag-input" value={shotTime} onChange={e=>setShotTime(e.target.value)} placeholder="e.g. 32"/></div>
                 <div><span className="diag-label">Actual Yield (g)</span><input className="diag-input" value={shotYield} onChange={e=>setShotYield(e.target.value)} placeholder="e.g. 36"/></div>
-              </div>
+              </div>}
               <div className="sec-lbl" style={{marginBottom:6}}>Describe Your Cup</div>
               <textarea className="ai-ta" rows={3} placeholder={method==="espresso"?"Taste, texture, finish...":method==="aeropress"?"e.g. 'Muddy, over-extracted...'":"e.g. 'Flat, no clarity...'"} value={diagInput} onChange={e=>setDiagInput(e.target.value)}/>
               <div className="fa" style={{marginBottom:14}}>
@@ -1312,40 +1390,61 @@ Give me: dose, ${method==="espresso"?"yield, time, temp, pre-brew":"water amount
     {screen==="compare"&&<div className="screen-body">
       <div className="tc">
         <div className="sec-lbl" style={{marginBottom:10}}>Compare Beans</div>
-        <div className="sec-txt" style={{marginBottom:12,fontSize:12}}>Pick up to two beans to compare side by side.</div>
+        <div className="sec-txt" style={{marginBottom:12,fontSize:12}}>Pick up to two beans to compare side by side. Differences are highlighted.</div>
         <div className="compare-picker">
           {sortedBeans.map(b=><button key={b.id} className={"compare-chip"+(compareIds.includes(b.id)?" sel":"")} onClick={()=>toggleCompare(b.id)}>{b.name}</button>)}
         </div>
         {compareIds.length===0&&<div className="empty-grind" style={{marginTop:20}}>Select beans above to compare</div>}
-        {compareIds.length>0&&<div className="compare-grid" style={{marginTop:16}}>
-          {compareIds.map(id=>{
-            const b=beans.find(x=>x.id===id);
-            if(!b)return null;
-            const e=b.methods.espresso;
-            return<div key={id} className="compare-col">
-              <div className="compare-name">{b.name}</div>
-              <div className="compare-roaster">{b.roaster}</div>
-              {b.rating>0&&<div className="bc-rating" style={{marginBottom:8}}>{"★".repeat(Math.round(b.rating/2))} {b.rating}/10</div>}
-              <div className="compare-row"><span>Origin</span><span>{b.origin||"—"}</span></div>
-              <div className="compare-row"><span>Process</span><span>{b.process||"—"}</span></div>
-              <div className="compare-row"><span>Roast</span><span>{b.roast||"—"}</span></div>
-              <div className="compare-row"><span>Altitude</span><span>{b.altitude||"—"}</span></div>
-              <div className="compare-row"><span>Flavor</span><span>{b.flavorProfile||"—"}</span></div>
-              <div className="div" style={{margin:"10px 0"}}/>
-              <div className="compare-row"><span>Dose→Yield</span><span>{e.dose}g→{e.yield}g</span></div>
-              <div className="compare-row"><span>Time</span><span>{e.time}s</span></div>
-              <div className="compare-row"><span>Temp</span><span>{e.temp}°F</span></div>
-              {e.notes&&<div className="compare-notes">{e.notes}</div>}
-            </div>;
-          })}
-        </div>}
+        {compareIds.length>0&&(()=>{
+          const compBeans=compareIds.map(id=>beans.find(x=>x.id===id)).filter(Boolean);
+          // A row "differs" when the compared beans don't all share the same value for that field —
+          // used to visually flag what's actually different rather than just listing everything flat.
+          const differs=(getter)=>{
+            if(compBeans.length<2)return false;
+            const vals=compBeans.map(b=>(getter(b)||"—").toString().trim().toLowerCase());
+            return new Set(vals).size>1;
+          };
+          const rowDefs=[
+            {label:"Origin",get:b=>b.origin},
+            {label:"Process",get:b=>b.process},
+            {label:"Roast",get:b=>b.roast},
+            {label:"Altitude",get:b=>b.altitude},
+            {label:"Flavor",get:b=>b.flavorProfile},
+          ];
+          const espRowDefs=[
+            {label:"Dose→Yield",get:b=>`${b.methods.espresso.dose}g→${b.methods.espresso.yield}g`},
+            {label:"Time",get:b=>`${b.methods.espresso.time}s`},
+            {label:"Temp",get:b=>`${b.methods.espresso.temp}°F`},
+          ];
+          return<>
+            <div className="compare-grid" style={{marginTop:16}}>
+              {compBeans.map(b=>{
+                const e=b.methods.espresso;
+                return<div key={b.id} className="compare-col">
+                  <div className="compare-name">{b.name}</div>
+                  <div className="compare-roaster">{b.roaster}</div>
+                  {b.rating>0&&<div className="bc-rating" style={{marginBottom:8}}>{"★".repeat(Math.round(b.rating/2))} {b.rating}/10</div>}
+                  {rowDefs.map(rd=><div key={rd.label} className={"compare-row"+(differs(rd.get)?" diff":"")}><span>{rd.label}</span><span>{rd.get(b)||"—"}</span></div>)}
+                  <div className="div" style={{margin:"10px 0"}}/>
+                  {espRowDefs.map(rd=><div key={rd.label} className={"compare-row"+(differs(rd.get)?" diff":"")}><span>{rd.label}</span><span>{rd.get(b)}</span></div>)}
+                  {e.notes&&<div className="compare-notes">{e.notes}</div>}
+                </div>;
+              })}
+            </div>
+            {compBeans.length>=2&&<div style={{marginTop:16}}>
+              <button className="btn ai" disabled={compareLoading} onClick={()=>runCompareAI(compBeans)}>{compareLoading?"Comparing...":"AI Comparison Summary"}</button>
+              {compareLoading&&<div className="ai-loading" style={{marginTop:10}}><div className="ai-dot"/><div className="ai-dot"/><div className="ai-dot"/></div>}
+              {compareResult&&<div className="ai-box" style={{marginTop:12}}><div className="ai-lbl">Result</div><div className="ai-result">{cleanMd(compareResult)}</div></div>}
+            </div>}
+          </>;
+        })()}
       </div>
     </div>}
 
     {screen==="discovery"&&<div className="screen-body">
       <div className="tc">
         <div className="sec-lbl" style={{marginBottom:6}}>Your Taste Profile</div>
-        <div className="sec-txt" style={{marginBottom:14,fontSize:12}}>A snapshot of what you've tried and what you tend to love.</div>
+        <div className="sec-txt" style={{marginBottom:14,fontSize:12}}>A snapshot of what you've tried and what you tend to love. Tap any group to see what's in it.</div>
         {(()=>{
           const ratedBeans=beans.filter(b=>b.rating>0).map(b=>({name:b.name,rating:b.rating}));
           const ratedAway=awayLog.filter(a=>a.rating>0).map(a=>({name:a.name,rating:a.rating}));
@@ -1353,20 +1452,24 @@ Give me: dose, ${method==="espresso"?"yield, time, temp, pre-brew":"water amount
           const totalTried=beans.length+awayLog.length;
           const avgRating=allRated.length?(allRated.reduce((s,b)=>s+b.rating,0)/allRated.length):null;
           const topBean=[...allRated].sort((a,b)=>b.rating-a.rating)[0];
-          const groupBy=(items,field,sortByRating)=>{
+          // Each tried item keeps enough info for the drill-down list: name, roaster, rating, and where it came from.
+          const allTried=[
+            ...beans.map(b=>({name:b.name,roaster:b.roaster,origin:b.origin,process:b.process,roast:b.roast,rating:b.rating||0,source:"Your Beans"})),
+            ...awayLog.map(a=>({name:a.name,roaster:a.roaster,origin:a.origin,process:a.process,roast:a.roast,rating:a.rating||0,source:"Tasting Log"})),
+          ];
+          const groupBy=(field,sortByRating)=>{
             const map={};
-            items.forEach(b=>{const key=(b[field]&&b[field].trim())||"Unknown";map[key]=map[key]||{sum:0,n:0,rated:0};map[key].sum+=(b.rating||0);map[key].n++;if(b.rating>0)map[key].rated++;});
-            const rows=Object.entries(map).map(([k,v])=>({k,avg:v.rated?v.sum/v.rated:0,n:v.n}));
+            allTried.forEach(item=>{const key=(item[field]&&item[field].trim())||"Unknown";map[key]=map[key]||{sum:0,n:0,rated:0,items:[]};map[key].sum+=(item.rating||0);map[key].n++;if(item.rating>0)map[key].rated++;map[key].items.push(item);});
+            const rows=Object.entries(map).map(([k,v])=>({k,avg:v.rated?v.sum/v.rated:0,n:v.n,items:v.items}));
             return sortByRating?rows.sort((a,b)=>b.avg-a.avg||b.n-a.n):rows.sort((a,b)=>b.n-a.n);
           };
-          // Tasting Log entries count toward the profile too, even before a bag is bought.
-          const allTried=[...beans,...awayLog.map(a=>({origin:a.origin,process:a.process,roast:a.roast,rating:a.rating||0}))];
-          const originRows=groupBy(allTried,"origin",false).slice(0,6);
-          const procRows=groupBy(allTried,"process",true).slice(0,6);
-          const roastRows=groupBy(allTried,"roast",true).slice(0,6);
+          const originRows=groupBy("origin",false).slice(0,6);
+          const originByRatingRows=groupBy("origin",true).slice(0,6);
+          const procRows=groupBy("process",true).slice(0,6);
+          const roastRows=groupBy("roast",true).slice(0,6);
           const palette=["#d4aa7a","#90b878","#789ab8","#c07878","#b8a0e0","#c8c040"];
 
-          const DonutChart=({rows})=>{
+          const DonutChart=({rows,onSelect})=>{
             const total=rows.reduce((s,r)=>s+r.n,0)||1;
             let cumulative=0;
             const R=15.9,C=2*Math.PI*R;
@@ -1379,25 +1482,25 @@ Give me: dose, ${method==="espresso"?"yield, time, temp, pre-brew":"water amount
                   const gap=C-dash;
                   const offset=-cumulative*C;
                   cumulative+=frac;
-                  return<circle key={r.k} cx="18" cy="18" r={R} fill="none" stroke={palette[i%palette.length]} strokeWidth="4" strokeDasharray={`${dash} ${gap}`} strokeDashoffset={offset} transform="rotate(-90 18 18)"/>;
+                  return<circle key={r.k} cx="18" cy="18" r={R} fill="none" stroke={palette[i%palette.length]} strokeWidth="4" strokeDasharray={`${dash} ${gap}`} strokeDashoffset={offset} transform="rotate(-90 18 18)" style={{cursor:"pointer"}} onClick={()=>onSelect(r)}/>;
                 })}
               </svg>
               <div className="donut-legend">
-                {rows.map((r,i)=><div key={r.k} className="donut-legend-row"><span className="donut-dot" style={{background:palette[i%palette.length]}}/><span className="donut-legend-lbl">{r.k}</span><span className="donut-legend-n">{r.n}</span></div>)}
+                {rows.map((r,i)=><button key={r.k} className="donut-legend-row" onClick={()=>onSelect(r)}><span className="donut-dot" style={{background:palette[i%palette.length]}}/><span className="donut-legend-lbl">{r.k}</span><span className="donut-legend-n">{r.n}</span></button>)}
               </div>
             </div>;
           };
 
-          const TopRated=({rows,title})=><div style={{marginBottom:16}}>
+          const TopRated=({rows,title,onSelect})=><div style={{marginBottom:16}}>
             <div className="sec-lbl" style={{marginBottom:8}}>{title}</div>
             {rows.length===0?<div className="empty-grind">Not enough data yet</div>:
               <div className="rank-list">
-                {rows.slice(0,5).map((r,i)=><div key={r.k} className="rank-row">
+                {rows.slice(0,5).map((r,i)=><button key={r.k} className="rank-row" onClick={()=>onSelect(r)}>
                   <span className="rank-num">{i+1}</span>
                   <span className="rank-lbl">{r.k}</span>
                   <span className="rank-n">{r.n} tried</span>
                   {r.avg>0&&<span className="rank-avg">{r.avg.toFixed(1)}</span>}
-                </div>)}
+                </button>)}
               </div>}
           </div>;
 
@@ -1409,10 +1512,29 @@ Give me: dose, ${method==="espresso"?"yield, time, temp, pre-brew":"water amount
             </div>
             {allRated.length===0?<div className="empty-grind" style={{marginTop:14}}>Rate a few beans to see your profile</div>:<>
               <div className="sec-lbl" style={{marginBottom:8,marginTop:18}}>Origin Mix</div>
-              <DonutChart rows={originRows}/>
-              <TopRated rows={procRows} title="Top Processes"/>
-              <TopRated rows={roastRows} title="Top Roast Levels"/>
+              <DonutChart rows={originRows} onSelect={setDiscoveryDrill}/>
+              <TopRated rows={originByRatingRows} title="Top Origins by Rating" onSelect={setDiscoveryDrill}/>
+              <TopRated rows={procRows} title="Top Processes" onSelect={setDiscoveryDrill}/>
+              <TopRated rows={roastRows} title="Top Roast Levels" onSelect={setDiscoveryDrill}/>
             </>}
+            {discoveryDrill&&<div className="modal-overlay" onClick={()=>setDiscoveryDrill(null)}>
+              <div className="modal" onClick={e=>e.stopPropagation()}>
+                <h2>{discoveryDrill.k}</h2>
+                <p>{discoveryDrill.n} tried{discoveryDrill.avg>0?` · ${discoveryDrill.avg.toFixed(1)} avg rating`:""}</p>
+                <div className="gl" style={{marginTop:10}}>
+                  {[...discoveryDrill.items].sort((a,b)=>(b.rating||0)-(a.rating||0)).map((item,i)=><div key={i} className="ge">
+                    <div>
+                      <div className="ge-pos" style={{fontSize:15,letterSpacing:0}}>{item.name}</div>
+                      <div className="ge-date">{item.roaster||"—"} · {item.source}</div>
+                    </div>
+                    {item.rating>0&&<div className="bc-rating">{item.rating.toFixed(1)}</div>}
+                  </div>)}
+                </div>
+                <div className="fa" style={{marginTop:14}}>
+                  <button className="btn" onClick={()=>setDiscoveryDrill(null)}>Close</button>
+                </div>
+              </div>
+            </div>}
           </>;
         })()}
         <div className="div"/>
