@@ -58,6 +58,9 @@ function saveBeans(b){try{localStorage.setItem(STORAGE_KEY,JSON.stringify(b));}c
 
 function loadAwayLog(){try{const r=localStorage.getItem(AWAYLOG_KEY);return r?JSON.parse(r):[];}catch(e){return[];}}
 function saveAwayLog(a){try{localStorage.setItem(AWAYLOG_KEY,JSON.stringify(a));}catch(e){}}
+const MATCH_KEY="coffeeLog_matches_v1";
+function loadMatchHistory(){try{const r=localStorage.getItem(MATCH_KEY);return r?JSON.parse(r):[];}catch(e){return[];}}
+function saveMatchHistory(a){try{localStorage.setItem(MATCH_KEY,JSON.stringify(a));}catch(e){}}
 
 // ── HELPERS ────────────────────────────────────────────────────────────────
 function grindLabel(pos){if(!pos)return"—";if(pos.dot===0)return String(pos.whole);return pos.whole+"·".repeat(pos.dot);}
@@ -524,6 +527,11 @@ function App(){
   const[discoveryResult,setDiscoveryResult]=useState("");
   const[discoveryDrill,setDiscoveryDrill]=useState(null);
   const[kioskMode,setKioskMode]=useState(false);
+  const[matchLoading,setMatchLoading]=useState(false);
+  const[matchResult,setMatchResult]=useState(null);
+  const[matchPhoto,setMatchPhoto]=useState(null);
+  const[matchSaved,setMatchSaved]=useState(false);
+  const[matchHistory,setMatchHistory]=useState(loadMatchHistory);
 
   // Use the smaller viewport dimension, not just width, so a phone rotated to landscape
   // (wide but still short) doesn't get mistaken for a desktop/tablet layout.
@@ -751,6 +759,39 @@ function App(){
       `Based on this person's rated coffees, identify patterns in what they like and dislike, then suggest 3-4 specific varietals, processes, or origins they should seek out next, with brief reasoning.\n\nHOME COLLECTION:\n${rated||"none yet"}\n\nTRIED ELSEWHERE:\n${away||"none yet"}\n\nGive: 1) A short taste profile summary (2-3 sentences), 2) A bulleted list of what to try next with 1-line reasoning each.`);
     setDiscoveryResult(r);setDiscoveryLoading(false);
   };
+
+  // ── SCAN & MATCH ──
+  const scanMatchPhoto=(e)=>{
+    const file=e.target.files?.[0];
+    if(!file)return;
+    const reader=new FileReader();
+    reader.onload=async(ev)=>{
+      const dataUrl=ev.target.result;
+      setMatchPhoto(dataUrl);setMatchResult(null);setMatchSaved(false);setMatchLoading(true);
+      const rated=beans.filter(b=>b.rating>0).map(b=>`${b.name} (${b.roaster}) - ${b.origin||"?"}, ${b.process||"?"}, ${b.roast||"?"} - rated ${b.rating}/10${b.flavorProfile?" - "+b.flavorProfile:""}`).join("\n");
+      const away=awayLog.map(a=>`${a.name}${a.roaster?" ("+a.roaster+")":""} - ${a.origin||"?"}, ${a.process||"?"} - rated ${a.rating||"?"}/10${a.notes?" - "+a.notes:""}`).join("\n");
+      if(!rated&&!away){
+        setMatchResult({error:"Rate a few beans first so there's a taste profile to match against."});
+        setMatchLoading(false);return;
+      }
+      const r=await callClaudeVision(
+        "You read a coffee bag label from a photo, then judge how well it matches this person's established taste profile. Return ONLY valid JSON, no markdown, no explanation.",
+        `First, read the bag label and extract what you can:\n{"roaster":"","name":"","origin":"","process":"","roast":"","varietal":"","flavorProfile":""}\n\nThen compare that bean against this person's taste history and estimate a percentage match (0-100) for how likely they are to enjoy it, based on origins/processes/roast levels/flavor notes they've rated highly vs. poorly.\n\nHOME COLLECTION (rated):\n${rated||"none yet"}\n\nTRIED ELSEWHERE:\n${away||"none yet"}\n\nReturn JSON exactly in this shape:\n{"roaster":"","name":"","origin":"","process":"","roast":"","varietal":"","flavorProfile":"","matchPct":0,"reasoning":""}\nmatchPct is your best-judgment estimate, not a precise statistic — reasoning should be 2-3 sentences citing specific patterns from their ratings.`,
+        dataUrl,true
+      );
+      if(r&&typeof r.matchPct!=="undefined")setMatchResult(r);
+      else setMatchResult({error:"Couldn't read the label clearly. Try a closer, well-lit photo."});
+      setMatchLoading(false);
+    };
+    reader.readAsDataURL(file);
+  };
+  const saveMatchResult=()=>{
+    if(!matchResult||matchResult.error)return;
+    setMatchHistory(h=>{const nh=[{...matchResult,photo:matchPhoto,id:Date.now(),date:new Date().toLocaleDateString()},...h];saveMatchHistory(nh);return nh;});
+    setMatchSaved(true);
+  };
+  const delMatch=id=>setMatchHistory(h=>{const nh=h.filter(x=>x.id!==id);saveMatchHistory(nh);return nh;});
+  const resetMatch=()=>{setMatchPhoto(null);setMatchResult(null);setMatchSaved(false);};
 
   const runCompareAI=async(compBeans)=>{
     setCompareLoading(true);setCompareResult("");
@@ -1542,6 +1583,51 @@ Give me: dose, ${method==="espresso"?"yield, time, temp, pre-brew":"water amount
         <button className="btn ai" disabled={discoveryLoading} onClick={runDiscovery}>{discoveryLoading?"Analyzing...":"Analyze & Recommend"}</button>
         {discoveryLoading&&<div className="ai-loading" style={{marginTop:10}}><div className="ai-dot"/><div className="ai-dot"/><div className="ai-dot"/></div>}
         {discoveryResult&&<div className="ai-box" style={{marginTop:12}}><div className="ai-lbl">Result</div><div className="ai-result">{cleanMd(discoveryResult)}</div></div>}
+
+        <div className="div"/>
+        <div className="sec-lbl" style={{marginBottom:8}}>Scan & Match</div>
+        <p style={{fontSize:13,color:"var(--muted)",marginTop:-4,marginBottom:10}}>Snap a photo of a bag (one bag per photo) and see how well it fits your taste profile.</p>
+        {!matchPhoto&&<label className="btn" style={{display:"inline-block"}}>
+          Take / Choose Photo
+          <input type="file" accept="image/*" style={{display:"none"}} onChange={scanMatchPhoto}/>
+        </label>}
+        {matchPhoto&&<div style={{marginTop:10}}>
+          <img src={matchPhoto} style={{width:120,height:120,objectFit:"cover",borderRadius:10,border:"1px solid var(--border)"}}/>
+          {matchLoading&&<div className="ai-loading" style={{marginTop:10}}><div className="ai-dot"/><div className="ai-dot"/><div className="ai-dot"/></div>}
+          {matchResult&&matchResult.error&&<div className="ai-box" style={{marginTop:10}}><div className="ai-result">{matchResult.error}</div></div>}
+          {matchResult&&!matchResult.error&&<div className="ai-box" style={{marginTop:10}}>
+            <div style={{display:"flex",alignItems:"center",justifyContent:"space-between"}}>
+              <div>
+                <div style={{fontWeight:700,fontSize:16}}>{matchResult.name||"Unknown bean"}</div>
+                <div style={{fontSize:13,color:"var(--muted)"}}>{matchResult.roaster||"—"}{matchResult.origin?" · "+matchResult.origin:""}{matchResult.process?" · "+matchResult.process:""}</div>
+              </div>
+              <div style={{fontSize:26,fontWeight:800,color:"var(--accent)"}}>{Math.round(matchResult.matchPct)}%</div>
+            </div>
+            <div className="ai-result" style={{marginTop:8}}>{cleanMd(matchResult.reasoning||"")}</div>
+            <div className="fa" style={{marginTop:12}}>
+              <button className="btn" onClick={resetMatch}>Scan Another</button>
+              <button className="btn primary" disabled={matchSaved} onClick={saveMatchResult}>{matchSaved?"✓ Saved":"Save / Remember"}</button>
+            </div>
+          </div>}
+        </div>}
+        {matchHistory.length>0&&<>
+          <div className="sec-lbl" style={{marginTop:16,marginBottom:8}}>Saved Matches</div>
+          <div className="gl">
+            {matchHistory.map(m=><div key={m.id} className="ge">
+              <div style={{display:"flex",alignItems:"center",gap:10}}>
+                {m.photo&&<img src={m.photo} style={{width:36,height:36,objectFit:"cover",borderRadius:6}}/>}
+                <div>
+                  <div className="ge-pos" style={{fontSize:14,letterSpacing:0}}>{m.name||"Unknown"}</div>
+                  <div className="ge-date">{m.roaster||"—"} · {m.date}</div>
+                </div>
+              </div>
+              <div style={{display:"flex",alignItems:"center",gap:10}}>
+                <div className="bc-rating">{Math.round(m.matchPct)}%</div>
+                <button className="btn sm" onClick={()=>delMatch(m.id)}>✕</button>
+              </div>
+            </div>)}
+          </div>
+        </>}
       </div>
     </div>}
 
