@@ -18,8 +18,8 @@ const {useState,useEffect,useRef} = React;
 
 // ── CONSTANTS ──────────────────────────────────────────────────────────────
 const DOTS=5,GRIND_MAX=12;
-const METHODS=["espresso","aeropress","pourover"];
-const METHOD_LABELS={espresso:"Espresso",aeropress:"AeroPress",pourover:"Pour Over"};
+const METHODS=["espresso","aeropress","pourover","moccamaster"];
+const METHOD_LABELS={espresso:"Espresso",aeropress:"AeroPress",pourover:"Pour Over",moccamaster:"Moccamaster"};
 const STORAGE_KEY="coffeeLog_v6";
 const LEGACY_KEYS=["coffeeLog_v5","coffeeLog_v4","coffeeLog_v3","coffeeLog_beans_v3"];
 const AWAYLOG_KEY="coffeeLog_awaylog_v1";
@@ -27,6 +27,8 @@ const DEF={
   espresso:{dose:"18",yield:"36",time:"28",temp:"200.5",preBrew:"2s on / 2s off",notes:"",whatWorked:"",whatDidnt:"",iced:""},
   aeropress:{dose:"15",water:"200",temp:"205",steepTime:"90",pressTime:"30",inverted:false,bloom:true,bloomTime:"30",notes:"",whatWorked:"",whatDidnt:""},
   pourover:{dose:"20",water:"300",temp:"205",bloomAmount:"40",bloomTime:"45",pours:"",totalTime:"3:30",notes:"",whatWorked:"",whatDidnt:""},
+  // Moccamaster KBT (full size): brew temp is fixed by the machine, so there is no temp field.
+  moccamaster:{dose:"60",water:"1000",totalTime:"6:00",notes:"",whatWorked:"",whatDidnt:""},
 };
 const ROAST_OPTS=["Light","Light-Medium","Medium","Medium-Dark","Dark"];
 const PROCESS_OPTS=["Washed","Natural","Honey","Anaerobic","Co-ferment","Washed co-ferment & washed","Wet-hulled","Mixed","Other"];
@@ -37,14 +39,17 @@ const YIELD_OPTS=["28","30","32","34","36","38","40","42","44"].map(v=>({value:v
 const TIME_OPTS=["20","22","24","25","26","27","28","29","30","31","32","33","34","35","36","38","40","42","45"].map(v=>({value:v,label:v+"s"}));
 const WATER_OPTS=["150","160","170","180","190","200","210","220"].map(v=>({value:v,label:v+"g"}));
 const STEEP_OPTS=["45","60","75","90","105","120","150","180"].map(v=>({value:v,label:v+"s"}));
+const DOSES_MOCCA=Array.from({length:25},(_,i)=>String(30+i*2.5)).map(v=>({value:v,label:v+"g"}));
+const WATER_MOCCA=Array.from({length:16},(_,i)=>String(500+i*50)).map(v=>({value:v,label:v+"ml"}));
+const ratioStr=(dose,water)=>{const d=parseFloat(dose),w=parseFloat(water);return d>0&&w>0?"1:"+(w/d).toFixed(1):"—";};
 const BLOOM_T=["20","25","30","35","40","45","50","60"].map(v=>({value:v,label:v+"s"}));
 
 // ── STORAGE ────────────────────────────────────────────────────────────────
 function migrate(b){
-  return{roastDate:"",imageUrl:"",imageBase64:"",imageOffsetX:50,imageOffsetY:50,imageZoom:100,rating:0,altitude:"",varietal:"",flavorProfile:"",inStock:true,currentlyBrewing:false,frozen:false,savedRecipes:{aeropress:[],pourover:[]},...b,
-    methods:{espresso:{...DEF.espresso,...(b.methods?.espresso||{})},aeropress:{...DEF.aeropress,...(b.methods?.aeropress||{})},pourover:{...DEF.pourover,...(b.methods?.pourover||{})}},
-    grindLogs:{espresso:b.grindLogs?.espresso||[],aeropress:b.grindLogs?.aeropress||[],pourover:b.grindLogs?.pourover||[]},
-    savedRecipes:b.savedRecipes||{aeropress:[],pourover:[]}};
+  return{roastDate:"",imageUrl:"",imageBase64:"",imageOffsetX:50,imageOffsetY:50,imageZoom:100,rating:0,altitude:"",varietal:"",flavorProfile:"",inStock:true,currentlyBrewing:false,frozen:false,savedRecipes:{aeropress:[],pourover:[],moccamaster:[]},...b,
+    methods:{espresso:{...DEF.espresso,...(b.methods?.espresso||{})},aeropress:{...DEF.aeropress,...(b.methods?.aeropress||{})},pourover:{...DEF.pourover,...(b.methods?.pourover||{})},moccamaster:{...DEF.moccamaster,...(b.methods?.moccamaster||{})}},
+    grindLogs:{espresso:b.grindLogs?.espresso||[],aeropress:b.grindLogs?.aeropress||[],pourover:b.grindLogs?.pourover||[],moccamaster:b.grindLogs?.moccamaster||[]},
+    savedRecipes:{aeropress:[],pourover:[],moccamaster:[],...(b.savedRecipes||{})}};
 }
 function loadBeans(){
   try{
@@ -68,7 +73,22 @@ function daysAgo(s){if(!s)return null;const d=new Date(s);if(isNaN(d))return nul
 function daysAgoNum(s){if(!s)return null;const d=new Date(s);if(isNaN(d))return null;return Math.floor((Date.now()-d.getTime())/86400000);}
 function fmtDate(s){if(!s)return"";const d=new Date(s+(s.length<=10?"T00:00:00":""));if(isNaN(d))return s;const mm=String(d.getMonth()+1).padStart(2,"0"),dd=String(d.getDate()).padStart(2,"0"),yy=String(d.getFullYear()).slice(-2);return`${mm}/${dd}/${yy}`;}
 function freshness(s,frozen){if(frozen)return{label:"Frozen",color:"var(--blue)"};const n=daysAgoNum(s);if(n===null)return null;if(n<5)return{label:"Too Fresh",color:"var(--blue)"};if(n<=30)return{label:"Peak",color:"var(--green)"};if(n<=45)return{label:"Aging",color:"var(--gold)"};return{label:"Past Peak",color:"var(--red)"};}
-function cleanMd(t){if(!t)return"";return t.replace(/^#{1,6}\s+/gm,"").replace(/\*\*(.+?)\*\*/g,"$1").replace(/\*(.+?)\*/g,"$1").replace(/^-{3,}\s*$/gm,"").replace(/^[-*]\s+/gm,"• ").trim();}
+function cleanMd(t){
+  if(!t)return"";
+  // Convert any stray markdown table into "Row — col: value" lines so it never renders as raw pipe/dash text.
+  t=t.replace(/(^\|.*\|[ \t]*\n)(^\|[ \t:|-]+\|[ \t]*\n)((?:^\|.*\|[ \t]*\n?)*)/gm,(m,headerLine,sepLine,bodyLines)=>{
+    const splitRow=l=>l.trim().replace(/^\||\|$/g,"").split("|").map(c=>c.trim());
+    const headers=splitRow(headerLine);
+    const rows=bodyLines.split("\n").filter(l=>l.trim().startsWith("|"));
+    return rows.map(row=>{
+      const cells=splitRow(row);
+      const label=cells[0];
+      const rest=cells.slice(1).map((c,i)=>headers[i+1]?`${headers[i+1]}: ${c}`:c).filter(x=>x).join(", ");
+      return rest?`${label} — ${rest}`:label;
+    }).join("\n");
+  });
+  return t.replace(/^#{1,6}\s+/gm,"").replace(/\*\*(.+?)\*\*/g,"$1").replace(/\*(.+?)\*/g,"$1").replace(/^-{3,}\s*$/gm,"").replace(/^[-*]\s+/gm,"• ").trim();
+}
 // Converts ALL CAPS or all-lowercase bag text into normal Title Case, but leaves already-mixed-case
 // text alone (so a name someone typed deliberately, like "iPhone"-style branding, isn't mangled).
 const TITLECASE_SMALL_WORDS=new Set(["a","an","and","as","at","but","by","de","del","el","for","in","la","le","of","on","or","the","to","van","von"]);
@@ -137,7 +157,7 @@ async function callClaudeVision(system,userText,imageDataUrl,json){
   }
 }
 
-const SYSTEM=`You are an expert specialty coffee consultant. Equipment: La Marzocco Linea Micra (dual boiler), Mahlkonig X64 SD single dose grinder (0-1 range for espresso, full 0-12 for manual methods, 5 dots between each number on the dial), Hario V60 with METAL mesh filter (no paper), AeroPress with PAPER filter (not metal), standard AeroPress (max 220g water capacity), temperature-controlled kettle, RO water with Third Wave espresso minerals.
+const SYSTEM=`You are an expert specialty coffee consultant. Equipment: La Marzocco Linea Micra (dual boiler), Mahlkonig X64 SD single dose grinder (0-1 range for espresso, full 0-12 for manual methods, 5 dots between each number on the dial), Hario V60 with METAL mesh filter (no paper), AeroPress with PAPER filter (not metal), standard AeroPress (max 220g water capacity), Technivorm Moccamaster KBT (full size, 1.25L, stainless thermal carafe with no hot plate, #4 cone paper filter, fixed brew temp around 196-205F, no small-batch switch, recommended 60g/L), temperature-controlled kettle, RO water with Third Wave espresso minerals.
 CRITICAL RULES: Shot SLOW >35s = NEVER finer grind. Shot FAST <22s = NEVER coarser. Sour+slow = channeling, fix puck prep first. Bitter+fast = over-extraction, coarser grind. AeroPress uses paper filter — grind accordingly. V60 uses metal filter — grind coarser than paper equivalent. AeroPress max 220g water. 3-5 bullets max. No fluff.`;
 
 // ── SMALL COMPONENTS (defined outside App so they never remount) ───────────
@@ -325,6 +345,20 @@ const POUROVER_ZONES=[
   {id:"astringent_dry",n:9,x:72,y:66,label:"Astringent",desc:"Drying, tannic, papery aftertaste",color:"#a87850",fix:"Reduce agitation, pour more gently, avoid disturbing the bed too much."},
   {id:"stalled_bitter",n:10,x:60,y:82,label:"Stalled / Bitter",desc:"Slow drain, bitter, possibly clogged bed",color:"#8a9878",fix:"Grind coarser — bed is too fine and choking the flow."},
 ];
+// Moccamaster is a full-batch automatic drip machine with a fixed brew temp and flow rate,
+// so the levers are grind, dose/ratio, and basket condition rather than temperature or pour technique.
+const MOCCA_ZONES=[
+  {id:"channeled_uneven",n:1,x:22,y:18,label:"Channeled / Uneven",desc:"Harsh and sour together, uneven extraction",color:"#c8b840",fix:"Level the bed before brewing and check the shower head is spraying evenly. Dose and grind may be fine."},
+  {id:"bitter_heavy",n:2,x:36,y:30,label:"Bitter & Heavy",desc:"Heavy, bitter, over-extracted",color:"#c8a050",fix:"Grind coarser, or drop the dose slightly."},
+  {id:"rich_full",n:3,x:48,y:42,label:"Rich & Full",desc:"Full body, good sweetness, slightly heavy",color:"#a8c060",fix:"Go a touch coarser for more clarity, or drop the dose slightly."},
+  {id:"sweet_spot",n:4,x:58,y:48,label:"Sweet Spot ✓",desc:"Balanced, clean, sweet, expressive",color:"#70b870",fix:"Dialed in. Note this recipe and the grind setting."},
+  {id:"bright_clean",n:5,x:68,y:38,label:"Bright & Clean",desc:"Bright, clean, delicate florals/fruit",color:"#78b878",fix:"Great as-is, or go slightly finer for more body."},
+  {id:"weak_thin",n:6,x:28,y:60,label:"Weak & Thin",desc:"Thin body, underdeveloped flavor",color:"#b8a840",fix:"Increase dose toward 60g/L, or grind finer."},
+  {id:"sour_fast",n:7,x:18,y:74,label:"Sour & Fast",desc:"Sour, drains too quickly, underextracted",color:"#c89040",fix:"Grind finer. A brew that finishes well under 5 minutes for a full batch is usually too coarse."},
+  {id:"flat_dull",n:8,x:44,y:76,label:"Flat / Dull",desc:"Muted, little aroma or brightness",color:"#9a9070",fix:"Preheat the carafe, check the beans are fresh, and descale if it has been a while."},
+  {id:"astringent_dry",n:9,x:72,y:66,label:"Astringent",desc:"Drying, tannic, papery aftertaste",color:"#a87850",fix:"Rinse the paper filter well, and avoid grinding too fine, which also over-extracts."},
+  {id:"stalled_bitter",n:10,x:60,y:82,label:"Overflow / Bitter",desc:"Basket slow or overflowing, bitter",color:"#8a9878",fix:"Grind coarser. Fines are clogging the filter and causing the basket to back up."},
+];
 
 function Compass({onSelect,selected,zones,title,subtitle,axisTop,axisBottom}){
   const shape="25,8 95,8 75,92 5,92";
@@ -465,6 +499,15 @@ function EditForm({draft,setDraft,method,updDraftM,adding,saveNew,saveEdit,setAd
       <div className="field full"><Field label="What Worked" value={m.whatWorked} onChange={u("whatWorked")} multiline/></div>
       <div className="field full"><Field label="What Didn't" value={m.whatDidnt} onChange={u("whatDidnt")} multiline/></div>
     </div>}
+    {method==="moccamaster"&&<div className="fg">
+      <Sel label="Dose" value={m.dose} onChange={u("dose")} options={DOSES_MOCCA}/>
+      <Sel label="Water" value={m.water} onChange={u("water")} options={WATER_MOCCA}/>
+      <Field label="Brew Time" value={m.totalTime} onChange={u("totalTime")} placeholder="e.g. 6:00"/>
+      <div className="field full"><div className="sec-txt" style={{fontSize:12}}>Ratio {ratioStr(m.dose,m.water)} (Moccamaster recommends about 1:16.7, or 60g per liter)</div></div>
+      <div className="field full"><Field label="Tasting Notes" value={m.notes} onChange={u("notes")} multiline/></div>
+      <div className="field full"><Field label="What Worked" value={m.whatWorked} onChange={u("whatWorked")} multiline/></div>
+      <div className="field full"><Field label="What Didn't" value={m.whatDidnt} onChange={u("whatDidnt")} multiline/></div>
+    </div>}
     <div className="fa" style={{paddingBottom:40}}>
       <button className="btn p" onClick={adding?saveNew:saveEdit}>{adding?"Save Bean":"Save"}</button>
       <button className="btn" onClick={()=>{if(adding){setAdding(false);setShowList(true);}else setEditing(false);}}>Cancel</button>
@@ -550,8 +593,8 @@ function App(){
   const upd=fn=>setBeans(prev=>{const next=fn(prev);saveBeans(next);return next;});
 
   const selectBean=id=>{setSelId(id);setShowList(false);setEditing(false);setAdding(false);setTab("shot");setDiagInput("");setUrlImport(null);setCompass(null);setShotTime("");setShotYield("");setActiveRecipeIdx(null);setRecipeFeedback("");setDiagFollowup("");setLastDiagCtx("");setTimeout(()=>{const d=document.querySelector(".detail");if(d)d.scrollTop=0;},50);};
-  const startAdd=()=>{setDraft({roaster:"",name:"",origin:"",process:"",roast:"",altitude:"",varietal:"",flavorProfile:"",roastDate:"",imageUrl:"",imageBase64:"",rating:0,inStock:true,currentlyBrewing:false,methods:{espresso:{...DEF.espresso},aeropress:{...DEF.aeropress},pourover:{...DEF.pourover}}});setAdding(true);setEditing(false);setShowList(false);setUrlImport(null);setUrlInput("");setPhotoImport(null);setCapturedPhoto(null);};
-  const saveNew=()=>{if(!draft.name)return;const id=Date.now();upd(bs=>[...bs,{...draft,id,grindLogs:{espresso:[],aeropress:[],pourover:[]},savedRecipes:{aeropress:[],pourover:[]}}]);setSelId(id);setAdding(false);setShowList(false);setTab("shot");};
+  const startAdd=()=>{setDraft({roaster:"",name:"",origin:"",process:"",roast:"",altitude:"",varietal:"",flavorProfile:"",roastDate:"",imageUrl:"",imageBase64:"",rating:0,inStock:true,currentlyBrewing:false,methods:{espresso:{...DEF.espresso},aeropress:{...DEF.aeropress},pourover:{...DEF.pourover},moccamaster:{...DEF.moccamaster}}});setAdding(true);setEditing(false);setShowList(false);setUrlImport(null);setUrlInput("");setPhotoImport(null);setCapturedPhoto(null);};
+  const saveNew=()=>{if(!draft.name)return;const id=Date.now();upd(bs=>[...bs,{...draft,id,grindLogs:{espresso:[],aeropress:[],pourover:[],moccamaster:[]},savedRecipes:{aeropress:[],pourover:[],moccamaster:[]}}]);setSelId(id);setAdding(false);setShowList(false);setTab("shot");};
   const delBean=id=>{upd(bs=>bs.filter(b=>b.id!==id));setSelId(null);setShowList(true);};
   const startEdit=()=>{setDraft({...cur,methods:JSON.parse(JSON.stringify(cur.methods))});setEditing(true);};
   const saveEdit=()=>{upd(bs=>bs.map(b=>b.id===selId?{...b,...draft}:b));setEditing(false);};
@@ -587,6 +630,11 @@ function App(){
       if(dose)updM("dose",dose);if(water)updM("water",water);if(temp)updM("temp",temp);
       if(bloom)updM("bloomAmount",bloom);if(bloomT)updM("bloomTime",bloomT);if(total)updM("totalTime",total);
       updM("pours",text);
+    }else if(method==="moccamaster"){
+      const dose=g([/dose[:\s]+(\d+(?:\.\d+)?)\s*g/i]);
+      const water=g([/water[:\s]+(\d+)\s*(?:ml|g)/i,/(\d+)\s*(?:ml|g)\s*water/i]);
+      const total=text.match(/(?:brew|total)[^\n]*?(\d+:\d+)/i)?.[1];
+      if(dose)updM("dose",dose);if(water)updM("water",water);if(total)updM("totalTime",total);
     }
   };
 
@@ -692,6 +740,8 @@ function App(){
       ?`Bean:${cur.name}(${cur.roaster}),${cur.origin},${cur.process},${cur.roast}. Setup:${md.dose}g/${md.temp}°F/grind ${grindLabel(lg?.position)}/pre-brew ${md.preBrew}. THIS SHOT:time=${tStr},yield=${yStr}.${slow}${fast}${cCtx}`
       :method==="aeropress"
       ?`Bean:${cur.name},${cur.process},${cur.roast}. AeroPress:${md.dose}g/${md.water}g/${md.temp}°F/steep ${md.steepTime}s/press ${md.pressTime}s.Inverted:${md.inverted}.Bloom:${md.bloom} ${md.bloomTime}s.Grind:${grindLabel(lg?.position)}.`
+      :method==="moccamaster"
+      ?`Bean:${cur.name},${cur.process},${cur.roast}. Moccamaster KBT batch drip:${md.dose}g/${md.water}ml (ratio ${ratioStr(md.dose,md.water)}),brew time ${md.totalTime}.Grind:${grindLabel(lg?.position)}.`
       :`Bean:${cur.name},${cur.process},${cur.roast}. Pour Over V60:${md.dose}g/${md.water}g/${md.temp}°F/bloom ${md.bloomAmount}g ${md.bloomTime}s/total ${md.totalTime}.Grind:${grindLabel(lg?.position)}.`;
     if(followup){
       const r=await callClaude(SYSTEM,`Previous setup and diagnosis:\n${lastDiagCtx}\nPrevious advice:\n${aiResult}\n\nThe person made this adjustment and pulled again: ${followup}\nCurrent setup:${ctx}\n\nDid the adjustment help? What should they try next?`);
@@ -710,6 +760,8 @@ function App(){
     const prev=activeRecipeIdx!==null&&saved?saved[activeRecipeIdx]?.text:null;
     const inst=method==="aeropress"
       ?"Generate AeroPress recipe. Uses PAPER filter. Max 220g water. Include:dose(g),water(g≤220),temp(°F),inverted or standard,bloom time(s),steep time(s),press time(s),grind setting on 0-12 scale with dots (e.g. 5··). Brief rationale."
+      :method==="moccamaster"
+      ?"Generate a Moccamaster KBT full-size batch drip recipe (#4 cone paper filter, brew temp is fixed by the machine so do not specify temperature). Include:dose(g),water(ml, max 1250),ratio,expected total brew time,grind on 0-12 scale with dots. Brief rationale."
       :"Generate pour over for Hario V60 with METAL filter (grind coarser than paper). Include:dose(g),water(g),temp(°F),bloom amount(g) and time(s),pour sequence with timing,total time,grind on 0-12 scale. Brief rationale.";
     const r=await callClaude(SYSTEM,`Bean:${bInfo}${recipeCtx?`\nContext:${recipeCtx}`:""}${prev?`\nPrevious recipe:\n${prev}`:""}${feedback?`\nFeedback:${feedback}\nAdjust accordingly.`:""}\n\n${inst}`);
     setAiResult(r);setAiLoading(false);
@@ -799,7 +851,7 @@ function App(){
       const e=b.methods.espresso;
       return`${b.name} by ${b.roaster}. Origin: ${b.origin||"unknown"}. Process: ${b.process||"unknown"}. Roast: ${b.roast||"unknown"}.${b.altitude?" Altitude: "+b.altitude+".":""}${b.flavorProfile?" Flavor: "+b.flavorProfile+".":""} Rating: ${b.rating||"not rated"}/10. Espresso dialed at ${e.dose}g→${e.yield}g/${e.time}s/${e.temp}°F.${e.notes?" Tasting notes: "+e.notes:""}`;
     };
-    const r=await callClaude("You are a coffee expert comparing two or more beans for someone deciding what to brew next. Be specific, reference the actual differences, keep it tight.",
+    const r=await callClaude("You are a coffee expert comparing two or more beans for someone deciding what to brew next. Be specific, reference the actual differences, keep it tight. Write in short paragraphs and bullet points only — never use a markdown table (no | pipe characters or --- separator rows), since the output renders as plain text.",
       `Compare these coffees and tell me: 1) the key differences that would actually affect flavor/brewing, 2) which one fits which mood or method better, 3) a one-line recommendation for right now.\n\n${compBeans.map((b,i)=>`Bean ${i+1}: ${describe(b)}`).join("\n\n")}`);
     setCompareResult(r);setCompareLoading(false);
   };
@@ -821,6 +873,7 @@ function App(){
       const gl=b.grindLogs[method]?.slice(-1)[0];
       if(method==="espresso")return`${b.name} (${b.origin||"?"}, ${b.process||"?"}, ${b.roast||"?"}) rated ${b.rating}/10 — dialed at ${m.dose}g→${m.yield}g/${m.time}s/${m.temp}°F${gl?", grind "+grindLabel(gl.position):""}${m.notes?". Notes: "+m.notes:""}`;
       if(method==="aeropress")return`${b.name} (${b.origin||"?"}, ${b.process||"?"}, ${b.roast||"?"}) rated ${b.rating}/10 — dialed at ${m.dose}g/${m.water}g/${m.temp}°F, steep ${m.steepTime}s${gl?", grind "+grindLabel(gl.position):""}${m.notes?". Notes: "+m.notes:""}`;
+      if(method==="moccamaster")return`${b.name} (${b.origin||"?"}, ${b.process||"?"}, ${b.roast||"?"}) rated ${b.rating}/10 — dialed at ${m.dose}g/${m.water}ml${gl?", grind "+grindLabel(gl.position):""}${m.notes?". Notes: "+m.notes:""}`;
       return`${b.name} (${b.origin||"?"}, ${b.process||"?"}, ${b.roast||"?"}) rated ${b.rating}/10 — dialed at ${m.dose}g/${m.water}g/${m.temp}°F${gl?", grind "+grindLabel(gl.position):""}${m.notes?". Notes: "+m.notes:""}`;
     }).join("\n");
     const methodLabel=METHOD_LABELS[method];
@@ -830,7 +883,7 @@ I want a starting point for ${methodLabel} on this bean. I haven't pulled a shot
 
 ${similar.length?"Here's how similar beans from my collection are dialed in on this same grinder, which should inform the starting point:\n"+similarCtx:"No closely similar beans in my collection yet — base this on best practice for this origin/process/roast combination."}
 
-Give me: dose, ${method==="espresso"?"yield, time, temp, pre-brew":"water amount, temp, "+(method==="aeropress"?"steep time, press time":"bloom amount/time, total time")}, and a starting grind setting on a 0-12 scale (0-1 range for espresso). One or two sentences of reasoning tied to the bean's specific process/origin. Keep it tight.`;
+Give me: dose, ${method==="espresso"?"yield, time, temp, pre-brew":(method==="moccamaster"?"water amount in ml, brew time":"water amount, temp, "+(method==="aeropress"?"steep time, press time":"bloom amount/time, total time"))}, and a starting grind setting on a 0-12 scale (0-1 range for espresso). One or two sentences of reasoning tied to the bean's specific process/origin. Keep it tight.`;
     const r=await callClaude(SYSTEM,prompt);
     setStartPointResult(prev=>({...prev,[cur.id+"_"+method]:r}));
     setStartPointLoading(false);
@@ -1118,7 +1171,7 @@ Give me: dose, ${method==="espresso"?"yield, time, temp, pre-brew":"water amount
       <div className="hdr-l">
         {isMobile&&!showList&&!adding&&!editing&&<button className="back" onClick={()=>{setShowList(true);}}>‹</button>}
         {isMobile&&(adding||editing)&&<button className="back" onClick={()=>{if(adding){setAdding(false);setShowList(true);}else{setEditing(false);}}}>‹</button>}
-        <div><h1>Coffee Log</h1><div className="hdr-sub">Micra · X64 SD · V60 · AeroPress</div></div>
+        <div><h1>Coffee Log</h1><div className="hdr-sub">Micra · X64 SD · V60 · AeroPress · Moccamaster</div></div>
       </div>
       <div className="hdr-r">
         {screen==="beans"&&<button className="btn sm" onClick={()=>setShowImportModal(true)}>Import</button>}
@@ -1307,6 +1360,15 @@ Give me: dose, ${method==="espresso"?"yield, time, temp, pre-brew":"water amount
                 </div>
                 {(()=>{const r=cur.savedRecipes?.pourover||[];const last=r.slice(-1)[0];return last?<div style={{marginBottom:14}}><div className="sec-lbl" style={{marginBottom:6}}>Active Recipe</div><div className="saved-recipe"><div className="saved-recipe-date">{last.date}</div><div className="saved-recipe-text">{last.text}</div><button className="btn sm" onClick={()=>setTab("recipe")}>View All →</button></div></div>:null;})()}
               </>}
+              {method==="moccamaster"&&<>
+                <div className="pg">
+                  <ShotParam label="Dose" value={md.dose} unit="g" onSave={v=>updM("dose",v)} options={DOSES_MOCCA}/>
+                  <ShotParam label="Water" value={md.water} unit="ml" onSave={v=>updM("water",v)} options={WATER_MOCCA}/>
+                  <ShotParam label="Brew Time" value={md.totalTime} onSave={v=>updM("totalTime",v)}/>
+                  <div className="pm"><div className="pm-lbl">Ratio</div><div className="pm-val sm">{ratioStr(md.dose,md.water)}</div></div>
+                </div>
+                {(()=>{const r=cur.savedRecipes?.moccamaster||[];const last=r.slice(-1)[0];return last?<div style={{marginBottom:14}}><div className="sec-lbl" style={{marginBottom:6}}>Active Recipe</div><div className="saved-recipe"><div className="saved-recipe-date">{last.date}</div><div className="saved-recipe-text">{last.text}</div><button className="btn sm" onClick={()=>setTab("recipe")}>View All →</button></div></div>:null;})()}
+              </>}
               <div className="grind-inline">
                 <div><div className="gi-lbl">Current Grind</div>{lg?<><div className="gi-val">{grindLabel(lg.position)}</div>{lg.note&&<div className="gi-sub">{lg.note}</div>}</>:<div className="gi-none">Not logged</div>}</div>
                 <button className="btn sm" onClick={()=>setTab("grind")}>{lg?"History":"Log"}</button>
@@ -1390,10 +1452,10 @@ Give me: dose, ${method==="espresso"?"yield, time, temp, pre-brew":"water amount
 
             {tab==="diagnose"&&<>
               <Compass onSelect={setCompass} selected={compass}
-                zones={method==="espresso"?ESPRESSO_ZONES:method==="aeropress"?AEROPRESS_ZONES:POUROVER_ZONES}
-                title={method==="espresso"?"Espresso Compass":method==="aeropress"?"AeroPress Compass":"Pour Over Compass"}
+                zones={method==="espresso"?ESPRESSO_ZONES:method==="aeropress"?AEROPRESS_ZONES:method==="moccamaster"?MOCCA_ZONES:POUROVER_ZONES}
+                title={method==="espresso"?"Espresso Compass":method==="aeropress"?"AeroPress Compass":method==="moccamaster"?"Moccamaster Compass":"Pour Over Compass"}
                 subtitle="Tap a numbered zone that matches your cup"
-                axisTop={method==="espresso"?["Under-extracted","Balanced","Over-extracted"]:method==="aeropress"?["Under-extracted","Balanced","Over-extracted"]:["Fast / Under","Balanced","Slow / Over"]}
+                axisTop={method==="espresso"?["Under-extracted","Balanced","Over-extracted"]:method==="aeropress"||method==="moccamaster"?["Under-extracted","Balanced","Over-extracted"]:["Fast / Under","Balanced","Slow / Over"]}
                 axisBottom={method==="espresso"?["Strong","Weak"]:["Full Body","Thin"]}
               />
               {method==="espresso"&&<div className="diag-row">
@@ -1401,7 +1463,7 @@ Give me: dose, ${method==="espresso"?"yield, time, temp, pre-brew":"water amount
                 <div><span className="diag-label">Actual Yield (g)</span><input className="diag-input" value={shotYield} onChange={e=>setShotYield(e.target.value)} placeholder="e.g. 36"/></div>
               </div>}
               <div className="sec-lbl" style={{marginBottom:6}}>Describe Your Cup</div>
-              <textarea className="ai-ta" rows={3} placeholder={method==="espresso"?"Taste, texture, finish...":method==="aeropress"?"e.g. 'Muddy, over-extracted...'":"e.g. 'Flat, no clarity...'"} value={diagInput} onChange={e=>setDiagInput(e.target.value)}/>
+              <textarea className="ai-ta" rows={3} placeholder={method==="espresso"?"Taste, texture, finish...":method==="aeropress"?"e.g. 'Muddy, over-extracted...'":method==="moccamaster"?"e.g. 'Thin and a little sour, brewed in 4:30...'":"e.g. 'Flat, no clarity...'"} value={diagInput} onChange={e=>setDiagInput(e.target.value)}/>
               <div className="fa" style={{marginBottom:14}}>
                 <button className="btn ai" disabled={aiLoading||(!diagInput.trim()&&!compass)} onClick={()=>runDiagnosis()}>{aiLoading?"Diagnosing...":"Diagnose"}</button>
                 {(aiResult||diagInput||compass)&&<button className="btn sm" onClick={()=>{setAiResult("");setDiagInput("");setCompass(null);setShotTime("");setShotYield("");setDiagFollowup("");setLastDiagCtx("");}}>Clear</button>}
