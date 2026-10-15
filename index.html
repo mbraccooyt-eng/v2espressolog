@@ -51,16 +51,54 @@ function migrate(b){
     grindLogs:{espresso:b.grindLogs?.espresso||[],aeropress:b.grindLogs?.aeropress||[],pourover:b.grindLogs?.pourover||[],moccamaster:b.grindLogs?.moccamaster||[]},
     savedRecipes:{aeropress:[],pourover:[],moccamaster:[],...(b.savedRecipes||{})}};
 }
+// If stored data exists but can't be read, we must NOT let the app overwrite it with an empty list.
+let LOAD_FAILED=false;
+const BACKUP_KEY="coffeeLog_autobackup_v1";
 function loadBeans(){
   try{
     const r=localStorage.getItem(STORAGE_KEY);
-    if(r)return JSON.parse(r).map(migrate);
+    if(r){
+      try{return JSON.parse(r).map(migrate);}
+      catch(e){LOAD_FAILED=true;try{localStorage.setItem("coffeeLog_unreadable_copy",r);}catch(e2){}return[];}
+    }
     for(const k of LEGACY_KEYS){const v=localStorage.getItem(k);if(v){const b=JSON.parse(v).map(migrate);localStorage.setItem(STORAGE_KEY,JSON.stringify(b));return b;}}
   }catch(e){}
   return[];
 }
-function saveBeans(b){try{localStorage.setItem(STORAGE_KEY,JSON.stringify(b));}catch(e){}}
+function loadAutoBackup(){try{const r=localStorage.getItem(BACKUP_KEY);if(!r)return null;const d=JSON.parse(r);return d&&Array.isArray(d.beans)&&d.beans.length?d:null;}catch(e){return null;}}
+function saveBeans(b){
+  if(LOAD_FAILED)return;
+  try{localStorage.setItem(STORAGE_KEY,JSON.stringify(b));}catch(e){}
+  // Rolling safety copy (photos stripped to stay small). A sudden drop of more than half the beans
+  // is treated as suspicious and does not replace the existing backup.
+  try{
+    const prev=loadAutoBackup();
+    if(b.length>0&&(!prev||b.length>=prev.beans.length*0.5)){
+      localStorage.setItem(BACKUP_KEY,JSON.stringify({savedAt:new Date().toISOString(),beans:b.map(({imageBase64,...rest})=>rest)}));
+    }
+  }catch(e){}
+}
 
+const LASTBACKUP_KEY="coffeeLog_lastbackup_v1";
+function loadLastBackup(){try{return parseInt(localStorage.getItem(LASTBACKUP_KEY)||"0",10)||0;}catch(e){return 0;}}
+function markBackupDone(){const t=Date.now();try{localStorage.setItem(LASTBACKUP_KEY,String(t));}catch(e){}return t;}
+// Saves text as a file through the iPhone share sheet (Save to Files / iCloud Drive / AirDrop), or a normal
+// download elsewhere. This is the only backup that survives the browser clearing the app's saved data.
+async function saveBackupFile(text,filename){
+  try{
+    const file=new File([text],filename,{type:"text/plain"});
+    if(navigator.canShare&&navigator.canShare({files:[file]})){
+      await navigator.share({files:[file],title:filename});
+      return "shared";
+    }
+  }catch(e){if(e&&e.name==="AbortError")return "cancelled";}
+  try{
+    const url=URL.createObjectURL(new Blob([text],{type:"text/plain"}));
+    const a=document.createElement("a");a.href=url;a.download=filename;document.body.appendChild(a);a.click();document.body.removeChild(a);
+    setTimeout(()=>URL.revokeObjectURL(url),4000);
+    return "downloaded";
+  }catch(e){return "failed";}
+}
 function loadAwayLog(){try{const r=localStorage.getItem(AWAYLOG_KEY);return r?JSON.parse(r):[];}catch(e){return[];}}
 function saveAwayLog(a){try{localStorage.setItem(AWAYLOG_KEY,JSON.stringify(a));}catch(e){}}
 const MATCH_KEY="coffeeLog_matches_v1";
@@ -518,6 +556,10 @@ function EditForm({draft,setDraft,method,updDraftM,adding,saveNew,saveEdit,setAd
 // ── MAIN APP ───────────────────────────────────────────────────────────────
 function App(){
   const[beans,setBeans]=useState(loadBeans);
+  const[autoBackup]=useState(loadAutoBackup);
+  const[lastBackup,setLastBackup]=useState(loadLastBackup);
+  const[nagDismissed,setNagDismissed]=useState(false);
+  const[backupMsg,setBackupMsg]=useState("");
   const[selId,setSelId]=useState(null);
   const[method,setMethod]=useState("espresso");
   const[tab,setTab]=useState("shot");
@@ -580,6 +622,7 @@ function App(){
   // (wide but still short) doesn't get mistaken for a desktop/tablet layout.
   useEffect(()=>{const chk=()=>setIsMobile(Math.min(window.innerWidth,window.innerHeight)<680);chk();window.addEventListener("resize",chk);window.addEventListener("orientationchange",chk);return()=>{window.removeEventListener("resize",chk);window.removeEventListener("orientationchange",chk);};},[]);
   useEffect(()=>{saveBeans(beans);},[beans]);
+  useEffect(()=>{try{if(navigator.storage&&navigator.storage.persist)navigator.storage.persist();}catch(e){}},[]);
   useEffect(()=>{try{const k=localStorage.getItem("coffeeLog_apikey");if(k)window._COFFEE_API_KEY=k;}catch(e){}},[]);
   useEffect(()=>{saveAwayLog(awayLog);},[awayLog]);
 
@@ -638,16 +681,22 @@ function App(){
     }
   };
 
-  const importFromText=()=>{
-    const raw=importText.trim();
+  const importFromText=(rawIn)=>{
+    const raw=(typeof rawIn==="string"?rawIn:importText).trim();
     // First try the new structured JSON export — exact round trip, all fields including images.
     try{
       const parsed=JSON.parse(raw);
       if(parsed&&parsed.type==="coffeeLogExport"&&Array.isArray(parsed.beans)){
         const incoming=parsed.beans.map(b=>migrate({...b,id:Date.now()+Math.random()}));
-        if(incoming.length===0){setImportStatus("No beans found in file.");return;}
+        if(incoming.length===0&&!(parsed.awayLog&&parsed.awayLog.length)){setImportStatus("No beans found in file.");return;}
         upd(bs=>[...bs,...incoming.filter(nb=>!bs.some(b=>b.name===nb.name&&b.roaster===nb.roaster))]);
-        setImportStatus(incoming.length+" bean(s) imported with full details!");
+        if(Array.isArray(parsed.awayLog)&&parsed.awayLog.length){
+          setAwayLog(a=>[...a,...parsed.awayLog.filter(x=>!a.some(y=>y.name===x.name&&y.roaster===x.roaster&&y.date===x.date))]);
+        }
+        if(Array.isArray(parsed.matches)&&parsed.matches.length){
+          setMatchHistory(h=>{const nh=[...h,...parsed.matches.filter(x=>!h.some(y=>y.id===x.id))];saveMatchHistory(nh);return nh;});
+        }
+        setImportStatus(incoming.length+" bean(s) imported with full details!"+(parsed.awayLog&&parsed.awayLog.length?" Tasting Log restored too.":""));
         setTimeout(()=>{setShowImportModal(false);setImportText("");setImportStatus("");},1500);
         return;
       }
@@ -790,6 +839,25 @@ function App(){
     const t=JSON.stringify(payload,compact?null:null,compact?0:2);
     navigator.clipboard.writeText(t).catch(()=>{});setCopied(true);setTimeout(()=>setCopied(false),2000);
     return t;
+  };
+
+  // Full backup to a FILE: beans (with photos), Tasting Log and saved Scan & Match results.
+  const backupAll=async()=>{
+    const payload={type:"coffeeLogExport",version:2,exportedAt:new Date().toISOString(),beans,awayLog,matches:matchHistory};
+    const name="coffee-log-backup-"+new Date().toISOString().slice(0,10)+".txt";
+    const r=await saveBackupFile(JSON.stringify(payload),name);
+    if(r==="shared"||r==="downloaded"){setLastBackup(markBackupDone());setBackupMsg(r==="shared"?"Backup saved. Choose Save to Files so it lives outside the browser.":"Backup downloaded to your device.");}
+    else if(r==="failed")setBackupMsg("Couldn't create the backup file. Try Export, then Full Backup instead.");
+    setTimeout(()=>setBackupMsg(""),6000);
+  };
+  const readBackupFile=(e)=>{
+    const f=e.target.files&&e.target.files[0];
+    if(!f)return;
+    const rd=new FileReader();
+    rd.onload=ev=>{importFromText(String(ev.target.result||""));};
+    rd.onerror=()=>setImportStatus("Error: couldn't read that file.");
+    rd.readAsText(f);
+    e.target.value="";
   };
 
   const saveApiKey=()=>{window._COFFEE_API_KEY=apiKeyInput.trim();try{localStorage.setItem("coffeeLog_apikey",apiKeyInput.trim());}catch(e){}setShowApiModal(false);};
@@ -1180,6 +1248,9 @@ Give me: dose, ${method==="espresso"?"yield, time, temp, pre-brew":(method==="mo
           {showExportMenu&&<>
             <div className="export-menu-backdrop" onClick={()=>setShowExportMenu(false)}/>
             <div className="export-menu">
+              <button className="export-menu-item" onClick={()=>{backupAll();setShowExportMenu(false);}}>
+                <span>Save Backup to Files</span><span className="export-menu-sub">Recommended. Everything, photos too, as a file</span>
+              </button>
               <button className="export-menu-item" onClick={()=>{exportText(true);setShowExportMenu(false);}}>
                 <span>Share (Text)</span><span className="export-menu-sub">No images — safe to paste anywhere</span>
               </button>
@@ -1204,6 +1275,18 @@ Give me: dose, ${method==="espresso"?"yield, time, temp, pre-brew":(method==="mo
       )}
     </div>}
 
+    {backupMsg&&<div style={{margin:"10px 15px 0",padding:"10px 14px",borderRadius:10,background:"var(--bg2)",border:"1px solid var(--green)",fontSize:13}}>{backupMsg}</div>}
+    {screen==="beans"&&!kioskMode&&beans.length>0&&!nagDismissed&&(Date.now()-lastBackup>7*86400000)&&<div style={{margin:"10px 15px 0",padding:"12px 14px",border:"1px solid var(--gold)",borderRadius:10,background:"var(--bg2)"}}>
+      <div style={{fontWeight:700,marginBottom:4}}>Back up your coffee log</div>
+      <div style={{fontSize:13,color:"var(--muted)",marginBottom:10}}>{lastBackup?("Last file backup: "+Math.floor((Date.now()-lastBackup)/86400000)+" days ago."):"You have never saved a backup file."} Your data only lives in this browser, and iPhone can clear it without warning.</div>
+      <button className="btn p sm" onClick={backupAll}>Save backup to Files</button>
+      <button className="btn sm" style={{marginLeft:8}} onClick={()=>setNagDismissed(true)}>Later</button>
+    </div>}
+    {screen==="beans"&&beans.length===0&&autoBackup&&<div style={{margin:"12px 15px",padding:"12px 14px",border:"1px solid var(--accent)",borderRadius:10,background:"var(--bg2)"}}>
+      <div style={{fontWeight:700,marginBottom:4}}>Your bean list is empty</div>
+      <div style={{fontSize:13,color:"var(--muted)",marginBottom:10}}>A backup of {autoBackup.beans.length} beans from {new Date(autoBackup.savedAt).toLocaleDateString()} is available (photos not included).</div>
+      <button className="btn p sm" onClick={()=>setBeans(autoBackup.beans.map(migrate))}>Restore backup</button>
+    </div>}
     {screen==="beans"&&<div className="dl">
       {/* BEAN LIST */}
       <div className="list-wrap" style={(isMobile&&(!showList||adding||editing))?{display:"none"}:{width:isMobile?"100%":undefined}}>
@@ -1790,10 +1873,15 @@ Give me: dose, ${method==="espresso"?"yield, time, temp, pre-brew":(method==="mo
       <div className="modal" onClick={e=>e.stopPropagation()}>
         <h2>Import Beans</h2>
         <p>Paste exported bean data below — includes images and every field. Beans already in your collection (same name + roaster) will be skipped.</p>
+        <label className="btn p" style={{display:"inline-block",marginBottom:10}}>
+          Choose Backup File
+          <input type="file" accept=".txt,.json,text/plain,application/json" style={{display:"none"}} onChange={readBackupFile}/>
+        </label>
+        <p style={{fontSize:12}}>Or paste text below.</p>
         <textarea value={importText} onChange={e=>setImportText(e.target.value)} placeholder="Paste exported text here..." style={{width:"100%",height:140,background:"var(--bg3)",border:"1px solid var(--border)",color:"var(--text)",fontFamily:"'DM Mono',monospace",fontSize:13,padding:"10px 12px",outline:"none",resize:"none",borderRadius:0,marginBottom:12,WebkitAppearance:"none",display:"block"}}/>
         {importStatus&&<p style={{color:importStatus.includes("Error")||importStatus.includes("No beans")?"var(--red)":"var(--green)",marginBottom:10}}>{importStatus}</p>}
         <div className="fa">
-          <button className="btn p" onClick={importFromText} disabled={!importText.trim()}>Import</button>
+          <button className="btn p" onClick={()=>importFromText()} disabled={!importText.trim()}>Import</button>
           <button className="btn" onClick={()=>{setShowImportModal(false);setImportText("");setImportStatus("");}}>Cancel</button>
         </div>
       </div>
