@@ -1,0 +1,114 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Coffee Log Recovery</title>
+<style>
+  :root{--bg:#14100d;--card:#211a15;--line:#3a2f27;--text:#f0e6da;--muted:#a89886;--accent:#d9a066;--ok:#7bc47f;--warn:#e0a050;}
+  *{box-sizing:border-box}
+  body{margin:0;padding:18px 16px 60px;background:var(--bg);color:var(--text);font:15px/1.5 -apple-system,system-ui,sans-serif}
+  h1{font-size:22px;margin:0 0 4px;color:var(--accent)}
+  p{margin:6px 0;color:var(--muted)}
+  .box{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px 14px;margin:12px 0}
+  .k{font-weight:700;word-break:break-all}
+  .meta{font-size:13px;color:var(--muted);margin:2px 0 8px}
+  .pre{font:12px/1.4 ui-monospace,Menlo,monospace;color:var(--muted);background:#0e0b09;border-radius:8px;padding:8px;max-height:84px;overflow:hidden;word-break:break-all;margin:8px 0}
+  button{font:inherit;font-weight:600;color:#1a120c;background:var(--accent);border:0;border-radius:9px;padding:9px 13px;margin:4px 6px 0 0}
+  button.alt{background:transparent;color:var(--accent);border:1px solid var(--accent)}
+  .ok{color:var(--ok)} .warn{color:var(--warn)}
+  #status{position:sticky;top:0;background:var(--bg);padding:6px 0;min-height:30px;font-weight:600}
+</style>
+</head>
+<body>
+<h1>Coffee Log Recovery</h1>
+<p>Read-only. This page only looks at what is saved in this browser for this site. It never changes or deletes anything.</p>
+<p id="origin"></p>
+<div id="status"></div>
+<div id="all"></div>
+<div id="list"></div>
+
+<script>
+(function(){
+  var statusEl=document.getElementById('status');
+  function say(msg,cls){statusEl.textContent=msg;statusEl.className=cls||'';}
+  document.getElementById('origin').textContent='Site: '+location.origin;
+
+  var store;
+  try{store=window.localStorage;store.length;}catch(e){
+    say('This browser is blocking saved data for this page ('+e.message+').','warn');return;
+  }
+
+  var keys=[];
+  for(var i=0;i<store.length;i++)keys.push(store.key(i));
+  keys.sort();
+
+  if(!keys.length){
+    say('Nothing is saved for this site in this browser tab.','warn');
+    document.getElementById('list').innerHTML='<div class="box">No saved data found here. If your data was in the Home Screen icon, open this page from that icon instead (you may need to add recover.html as a bookmark there), or try a different browser.</div>';
+    return;
+  }
+
+  function sizeKB(s){return (s.length/1024).toFixed(1)+' KB';}
+  function describe(k,v){
+    try{
+      var d=JSON.parse(v);
+      if(Array.isArray(d))return 'List of '+d.length+' items';
+      if(d&&d.type==='coffeeLogExport'&&Array.isArray(d.beans))return 'Export with '+d.beans.length+' beans';
+      if(d&&Array.isArray(d.beans))return 'Backup with '+d.beans.length+' beans';
+      return 'Readable data';
+    }catch(e){return 'Plain text or unreadable';}
+  }
+  function copyText(text,label){
+    function fallback(){
+      var ta=document.createElement('textarea');ta.value=text;ta.style.position='fixed';ta.style.opacity='0';
+      document.body.appendChild(ta);ta.focus();ta.select();
+      var ok=false;try{ok=document.execCommand('copy');}catch(e){}
+      document.body.removeChild(ta);
+      say(ok?('Copied '+label+'. Paste it somewhere safe, like Notes.'):'Copy failed. Try "Share as file" instead.',ok?'ok':'warn');
+    }
+    if(navigator.clipboard&&navigator.clipboard.writeText){
+      navigator.clipboard.writeText(text).then(function(){say('Copied '+label+'. Paste it somewhere safe, like Notes.','ok');},fallback);
+    }else fallback();
+  }
+  function shareFile(text,name){
+    try{
+      var file=new File([text],name,{type:'text/plain'});
+      if(navigator.canShare&&navigator.canShare({files:[file]})){
+        navigator.share({files:[file],title:name}).then(function(){say('Shared.','ok');}).catch(function(e){if(e&&e.name!=='AbortError')say('Share failed: '+e.message,'warn');});
+        return;
+      }
+    }catch(e){}
+    var url=URL.createObjectURL(new Blob([text],{type:'text/plain'}));
+    var a=document.createElement('a');a.href=url;a.download=name;document.body.appendChild(a);a.click();document.body.removeChild(a);
+    say('Download started: '+name,'ok');
+  }
+
+  // Everything in one file
+  var everything={};
+  keys.forEach(function(k){everything[k]=store.getItem(k);});
+  var allText=JSON.stringify({type:'coffeeLogRawDump',savedAt:new Date().toISOString(),origin:location.origin,keys:everything});
+  var allBox=document.getElementById('all');
+  allBox.innerHTML='<div class="box"><div class="k">Everything ('+keys.length+' items, '+sizeKB(allText)+')</div><div class="meta">Best first step: save all of it to a file. It includes your API key, so keep the file private.</div></div>';
+  var b1=document.createElement('button');b1.textContent='Share everything as file';b1.onclick=function(){shareFile(allText,'coffee-log-raw-dump.txt');};
+  var b2=document.createElement('button');b2.className='alt';b2.textContent='Copy everything';b2.onclick=function(){copyText(allText,'everything');};
+  allBox.firstChild.appendChild(b1);allBox.firstChild.appendChild(b2);
+
+  say('Found '+keys.length+' saved items.','ok');
+
+  var list=document.getElementById('list');
+  keys.forEach(function(k){
+    var v=store.getItem(k)||'';
+    var box=document.createElement('div');box.className='box';
+    var title=document.createElement('div');title.className='k';title.textContent=k;
+    var meta=document.createElement('div');meta.className='meta';meta.textContent=sizeKB(v)+' · '+describe(k,v);
+    var pre=document.createElement('div');pre.className='pre';pre.textContent=/key|token|secret/i.test(k)?'(hidden, '+v.length+' characters)':v.slice(0,220)+(v.length>220?'…':'');
+    var c=document.createElement('button');c.textContent='Copy';c.onclick=function(){copyText(v,k);};
+    var s=document.createElement('button');s.className='alt';s.textContent='Share as file';s.onclick=function(){shareFile(v,k+'.txt');};
+    box.appendChild(title);box.appendChild(meta);box.appendChild(pre);box.appendChild(c);box.appendChild(s);
+    list.appendChild(box);
+  });
+})();
+</script>
+</body>
+</html>
