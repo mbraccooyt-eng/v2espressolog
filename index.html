@@ -46,7 +46,7 @@ const BLOOM_T=["20","25","30","35","40","45","50","60"].map(v=>({value:v,label:v
 
 // ── STORAGE ────────────────────────────────────────────────────────────────
 function migrate(b){
-  return{roastDate:"",imageUrl:"",imageBase64:"",imageOffsetX:50,imageOffsetY:50,imageZoom:100,rating:0,altitude:"",varietal:"",flavorProfile:"",inStock:true,currentlyBrewing:false,frozen:false,savedRecipes:{aeropress:[],pourover:[],moccamaster:[]},...b,
+  return{roastDate:"",imageUrl:"",imageBase64:"",imageOffsetX:50,imageOffsetY:50,imageZoom:100,rating:0,altitude:"",varietal:"",flavorProfile:"",inStock:true,currentlyBrewing:false,frozen:false,frozenOn:"",thawedOn:"",savedRecipes:{aeropress:[],pourover:[],moccamaster:[]},...b,
     methods:{espresso:{...DEF.espresso,...(b.methods?.espresso||{})},aeropress:{...DEF.aeropress,...(b.methods?.aeropress||{})},pourover:{...DEF.pourover,...(b.methods?.pourover||{})},moccamaster:{...DEF.moccamaster,...(b.methods?.moccamaster||{})}},
     grindLogs:{espresso:b.grindLogs?.espresso||[],aeropress:b.grindLogs?.aeropress||[],pourover:b.grindLogs?.pourover||[],moccamaster:b.grindLogs?.moccamaster||[]},
     savedRecipes:{aeropress:[],pourover:[],moccamaster:[],...(b.savedRecipes||{})}};
@@ -110,7 +110,33 @@ function grindLabel(pos){if(!pos)return"—";if(pos.dot===0)return String(pos.wh
 function daysAgo(s){if(!s)return null;const d=new Date(s);if(isNaN(d))return null;const n=Math.floor((Date.now()-d.getTime())/86400000);return n===0?"Today":n===1?"1 day ago":n+" days ago";}
 function daysAgoNum(s){if(!s)return null;const d=new Date(s);if(isNaN(d))return null;return Math.floor((Date.now()-d.getTime())/86400000);}
 function fmtDate(s){if(!s)return"";const d=new Date(s+(s.length<=10?"T00:00:00":""));if(isNaN(d))return s;const mm=String(d.getMonth()+1).padStart(2,"0"),dd=String(d.getDate()).padStart(2,"0"),yy=String(d.getFullYear()).slice(-2);return`${mm}/${dd}/${yy}`;}
-function freshness(s,frozen){if(frozen)return{label:"Frozen",color:"var(--blue)"};const n=daysAgoNum(s);if(n===null)return null;if(n<5)return{label:"Too Fresh",color:"var(--blue)"};if(n<=30)return{label:"Peak",color:"var(--green)"};if(n<=45)return{label:"Aging",color:"var(--gold)"};return{label:"Past Peak",color:"var(--red)"};}
+// ── Freezer-aware age ──
+// Age stops counting while beans are frozen. effective age = days from roast to freezing, plus days since the
+// beans were taken out. A bean marked Frozen with no dates (older entries) still just shows "Frozen".
+function parseD(s){if(!s)return null;const m=String(s).match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);if(m)return new Date(Date.UTC(+m[1],+m[2]-1,+m[3]));const d=new Date(s);return isNaN(d)?null:d;}
+function todayISO(){const d=new Date();return d.getFullYear()+"-"+String(d.getMonth()+1).padStart(2,"0")+"-"+String(d.getDate()).padStart(2,"0");}
+function dayDiff(a,b){const x=parseD(a),y=parseD(b);if(!x||!y)return null;return Math.round((y-x)/86400000);}
+function isFrozen(b){return b.frozenOn?!b.thawedOn:!!b.frozen;}
+function effectiveAge(b){
+  if(!b.roastDate)return null;
+  if(b.frozenOn){
+    const atFreeze=dayDiff(b.roastDate,b.frozenOn);
+    if(atFreeze!==null){
+      const base=Math.max(0,atFreeze);
+      if(!b.thawedOn)return base;
+      const since=dayDiff(b.thawedOn,todayISO());
+      if(since!==null)return base+Math.max(0,since);
+    }
+  }
+  return dayDiff(b.roastDate,todayISO());
+}
+function ageLabel(b){
+  const n=effectiveAge(b);
+  if(n===null)return null;
+  if(b.frozenOn)return isFrozen(b)?"Frozen at "+n+(n===1?" day":" days"):n+(n===1?" day":" days")+" of age";
+  return n===0?"Today":n===1?"1 day ago":n+" days ago";
+}
+function freshness(b){if(isFrozen(b))return{label:"Frozen",color:"var(--blue)"};const n=effectiveAge(b);if(n===null)return null;if(n<5)return{label:"Too Fresh",color:"var(--blue)"};if(n<=30)return{label:"Peak",color:"var(--green)"};if(n<=45)return{label:"Aging",color:"var(--gold)"};return{label:"Past Peak",color:"var(--red)"};}
 function cleanMd(t){
   if(!t)return"";
   // Convert any stray markdown table into "Row — col: value" lines so it never renders as raw pipe/dash text.
@@ -164,6 +190,87 @@ async function callClaude(system,user,json){
     if(m.includes("NetworkError")||m.includes("Failed to fetch")||m.includes("Load failed"))
       return json?null:"⚠️ Network blocked. Try opening in Safari browser directly.";
     return json?null:"Error: "+m;
+  }
+}
+
+// ── URL import ──
+// Claude cannot open links by itself, so the page is read with the API's server-side web fetch tool.
+// (The browser can't fetch most shop pages directly because of CORS.)
+const BEAN_KEYS=["roaster","name","origin","process","roast","altitude","varietal","flavorProfile","roastDate","imageUrl"];
+function beanExtractPrompt(source){
+  return`${source}
+
+Extract the coffee bean details. Return ONLY one JSON object, no markdown and no commentary, exactly in this shape:
+{"roaster":"","name":"","origin":"","process":"","roast":"","altitude":"","varietal":"","flavorProfile":"","roastDate":"","imageUrl":""}
+Rules:
+- Use "" for anything the page does not state. Never guess.
+- roaster: the company selling the coffee. name: the coffee's own name, without the roaster's name and without size or grind words.
+- origin: country or countries only, for example "Ethiopia" or "Colombia & Ethiopia" (put regions and farms elsewhere, not here).
+- process: one of ${PROCESS_OPTS.join(", ")}. Use "Mixed" for blends of different processes.
+- roast: one of ${ROAST_OPTS.join(", ")}.
+- altitude like "2050m". varietal as listed. flavorProfile: the tasting notes, comma separated.
+- roastDate as YYYY-MM-DD only if the page shows one.
+- imageUrl only if a product image URL appears in the content, otherwise "".`;
+}
+function extractJsonObject(text){const m=String(text||"").match(/\{[\s\S]*\}/);if(!m)return null;try{return JSON.parse(m[0]);}catch(e){return null;}}
+// Keep only non-empty fields and snap roast/process to the app's option lists so the dropdowns work.
+function cleanBeanFields(r){
+  const out={};
+  BEAN_KEYS.forEach(k=>{const v=r&&r[k];if(typeof v==="string"&&v.trim()&&v.trim().toLowerCase()!=="n/a")out[k]=v.trim();});
+  if(out.roast){const m=ROAST_OPTS.find(o=>o.toLowerCase()===out.roast.toLowerCase());if(m)out.roast=m;else delete out.roast;}
+  if(out.process){
+    const low=out.process.toLowerCase();
+    const exact=PROCESS_OPTS.find(o=>o.toLowerCase()===low);
+    const part=PROCESS_OPTS.filter(o=>o!=="Other"&&o!=="Mixed").find(o=>low.includes(o.toLowerCase()));
+    out.process=exact||part||"Other";
+  }
+  return out;
+}
+const FETCH_ERRORS={
+  url_not_allowed:"That site doesn't allow automated reading, or web fetch is switched off for your Anthropic organization.",
+  url_not_accessible:"The site returned an error when I tried to open the page.",
+  unsupported_content_type:"That link isn't a normal web page.",
+  invalid_tool_input:"That doesn't look like a valid web address.",
+  url_too_long:"That link is too long. Remove everything after the ? and try again.",
+  too_many_requests:"Too many lookups at once. Wait a minute and try again.",
+  max_uses_exceeded:"The lookup limit was reached. Try again.",
+  unavailable:"The page reader had a temporary problem. Try again in a moment."
+};
+async function callClaudeFetchUrl(rawUrl){
+  const key=window._COFFEE_API_KEY;
+  if(!key)return{error:"No API key yet. Tap the gear icon to add your Anthropic API key.",code:"nokey"};
+  let url=rawUrl.trim();
+  if(!/^https?:\/\//i.test(url))url="https://"+url;
+  if(url.length>250)url=url.split("#")[0].split("?")[0];
+  const messages=[{role:"user",content:beanExtractPrompt("Open this coffee product page and read it.\n\nURL: "+url)}];
+  try{
+    let d=null;
+    for(let turn=0;turn<3;turn++){
+      const res=await fetch("https://api.anthropic.com/v1/messages",{method:"POST",
+        headers:{"Content-Type":"application/json","x-api-key":key,"anthropic-version":"2023-06-01","anthropic-dangerous-direct-browser-access":"true"},
+        body:JSON.stringify({model:"claude-sonnet-4-6",max_tokens:1500,
+          system:"You read coffee roaster product pages and extract structured bean details. Fetch the given URL, then answer with the JSON object only.",
+          tools:[{type:"web_fetch_20250910",name:"web_fetch",max_uses:2,max_content_tokens:30000}],messages})});
+      if(!res.ok){
+        const t=await res.text();let msg=t;try{msg=JSON.parse(t).error.message;}catch(e){}
+        return{error:"The page lookup was rejected ("+res.status+"): "+String(msg).slice(0,180),code:"api"};
+      }
+      d=await res.json();
+      if(d.stop_reason==="pause_turn"){messages.push({role:"assistant",content:d.content});continue;}
+      break;
+    }
+    const blocks=(d&&d.content)||[];
+    const text=blocks.filter(b=>b.type==="text").map(b=>b.text||"").join("");
+    const data=extractJsonObject(text);
+    const cleaned=cleanBeanFields(data);
+    if(cleaned.name||cleaned.roaster)return{data:cleaned};
+    const errBlock=blocks.find(b=>b.type==="web_fetch_tool_result"&&b.content&&b.content.type==="web_fetch_tool_result_error");
+    if(errBlock){const c=errBlock.content.error_code;return{error:FETCH_ERRORS[c]||"The page couldn't be read ("+c+").",code:c||"fetch"};}
+    return{error:"I opened the page but couldn't find bean details on it. It may build its content with JavaScript.",code:"empty"};
+  }catch(e){
+    const m=e.message||String(e);
+    if(m.includes("NetworkError")||m.includes("Failed to fetch")||m.includes("Load failed"))return{error:"Couldn't reach the Anthropic API. Check your connection.",code:"network"};
+    return{error:"Error: "+m,code:"exception"};
   }
 }
 
@@ -558,6 +665,7 @@ function App(){
   const[beans,setBeans]=useState(loadBeans);
   const[autoBackup]=useState(loadAutoBackup);
   const[lastBackup,setLastBackup]=useState(loadLastBackup);
+  const[freezerDlg,setFreezerDlg]=useState(null);
   const[nagDismissed,setNagDismissed]=useState(false);
   const[backupMsg,setBackupMsg]=useState("");
   const[selId,setSelId]=useState(null);
@@ -587,6 +695,7 @@ function App(){
   const[urlInput,setUrlInput]=useState("");
   const[urlLoading,setUrlLoading]=useState(false);
   const[urlImport,setUrlImport]=useState(null);
+  const[urlPaste,setUrlPaste]=useState("");
   const[photoLoading,setPhotoLoading]=useState(false);
   const[photoImport,setPhotoImport]=useState(null);
   const[capturedPhoto,setCapturedPhoto]=useState(null);
@@ -643,6 +752,12 @@ function App(){
   const saveEdit=()=>{upd(bs=>bs.map(b=>b.id===selId?{...b,...draft}:b));setEditing(false);};
   const updDraftM=(f,v)=>setDraft(d=>({...d,methods:{...d.methods,[method]:{...d.methods[method],[f]:v}}}));
   const updM=(f,v)=>{let val=v;if(f==="water"&&method==="aeropress"){const n=parseInt(val);if(!isNaN(n)&&n>220)val="220";}upd(bs=>bs.map(b=>b.id===selId?{...b,methods:{...b.methods,[method]:{...b.methods[method],[f]:val}}}:b));};
+  const saveFreezer=()=>{
+    const f=freezerDlg.frozenOn||"",t=f?(freezerDlg.thawedOn||""):"";
+    upd(bs=>bs.map(b=>b.id===selId?{...b,frozenOn:f,thawedOn:t,frozen:!!f&&!t}:b));
+    setFreezerDlg(null);
+  };
+  const clearFreezer=()=>{upd(bs=>bs.map(b=>b.id===selId?{...b,frozenOn:"",thawedOn:"",frozen:false}:b));setFreezerDlg(null);};
   const updB=(f,v)=>upd(bs=>bs.map(b=>b.id===selId?{...b,[f]:v}:b));
 
   const saveGrind=()=>{const e={...grindDraft,id:Date.now(),date:grindDraft.date||new Date().toLocaleDateString()};upd(bs=>bs.map(b=>b.id===selId?{...b,grindLogs:{...b.grindLogs,[method]:[...(b.grindLogs[method]||[]),e]}}:b));setAddingGrind(false);setGrindDraft({position:{whole:0,dot:0},note:"",date:""});};
@@ -733,7 +848,26 @@ function App(){
     }catch(e){setImportStatus("Error: "+e.message);}
   };
 
-  const importUrl=async()=>{if(!urlInput.trim())return;setUrlLoading(true);setUrlImport(null);const r=await callClaude("Extract coffee bean info from URL. Return ONLY valid JSON, no markdown.",`URL:${urlInput}\nReturn JSON:{"roaster":"","name":"","origin":"","process":"","roast":"","altitude":"","varietal":"","flavorProfile":"","imageUrl":""}`,true);if(r)setDraft(d=>({...d,...r,name:titleCase(r.name),roaster:titleCase(r.roaster)}));setUrlImport(r||{error:"Couldn't parse URL."});setUrlLoading(false);};
+  const applyBeanData=f=>{
+    setDraft(d=>({...d,...f,name:f.name?titleCase(f.name):d.name,roaster:f.roaster?titleCase(f.roaster):d.roaster}));
+    setUrlImport({...f,_count:Object.keys(f).length});
+  };
+  const importUrl=async()=>{
+    if(!urlInput.trim())return;
+    setUrlLoading(true);setUrlImport(null);
+    const r=await callClaudeFetchUrl(urlInput);
+    if(r.data)applyBeanData(r.data);else setUrlImport({error:r.error,code:r.code});
+    setUrlLoading(false);
+  };
+  const importUrlText=async()=>{
+    if(!urlPaste.trim())return;
+    setUrlLoading(true);setUrlImport(null);
+    const r=await callClaude("You extract structured coffee bean details from pasted product page text. Return ONLY valid JSON, no markdown.",beanExtractPrompt("Here is the text of a coffee product page:\n\n"+urlPaste.slice(0,15000)),true);
+    const f=cleanBeanFields(r);
+    if(f.name||f.roaster){applyBeanData(f);setUrlPaste("");}
+    else setUrlImport({error:"I couldn't find bean details in that text. Make sure it includes the coffee's name and description.",code:"paste"});
+    setUrlLoading(false);
+  };
 
   const handleBagPhoto=(e)=>{
     const file=e.target.files?.[0];
@@ -957,7 +1091,7 @@ Give me: dose, ${method==="espresso"?"yield, time, temp, pre-brew":(method==="mo
     setStartPointLoading(false);
   };
 
-  const sortedBeans=[...beans].sort((a,b)=>{const ao=a.inStock===false,bo=b.inStock===false;if(ao!==bo)return ao?1:-1;return(b.rating||0)-(a.rating||0);});
+  const sortedBeans=[...beans].sort((a,b)=>{if(!!a.currentlyBrewing!==!!b.currentlyBrewing)return a.currentlyBrewing?-1:1;const ao=a.inStock===false,bo=b.inStock===false;if(ao!==bo)return ao?1:-1;return(b.rating||0)-(a.rating||0);});
   const imgUrl=cur?.imageBase64||cur?.imageUrl;
 
   const AiBox=({showSave})=><>
@@ -1303,7 +1437,7 @@ Give me: dose, ${method==="espresso"?"yield, time, temp, pre-brew":(method==="mo
           {beans.length===0&&<div className="empty">No beans yet — tap + Add above</div>}
           {sortedBeans.map(b=>{
             const eg=b.grindLogs?.espresso?.slice(-1)[0];
-            const da=daysAgo(b.roastDate);
+            const da=ageLabel(b);
             const img=b.imageBase64||b.imageUrl;
             const out=b.inStock===false;
             return<div key={b.id} className={"bean-card"+(selId===b.id?" sel":"")+(out?" out":"")} onClick={()=>selectBean(b.id)}>
@@ -1315,7 +1449,7 @@ Give me: dose, ${method==="espresso"?"yield, time, temp, pre-brew":(method==="mo
                 <div className="bc-badges">
                   {b.currentlyBrewing&&<span className="bc-badge brewing">Brewing Now</span>}
                   {out&&<span className="bc-badge out">Out of Stock</span>}
-                  {!out&&freshness(b.roastDate,b.frozen)&&freshness(b.roastDate,b.frozen).label!=="Peak"&&<span className="bc-badge" style={{color:freshness(b.roastDate,b.frozen).color,borderColor:freshness(b.roastDate,b.frozen).color,background:"transparent"}}>{freshness(b.roastDate,b.frozen).label}</span>}
+                  {!out&&freshness(b)&&freshness(b).label!=="Peak"&&<span className="bc-badge" style={{color:freshness(b).color,borderColor:freshness(b).color,background:"transparent"}}>{freshness(b).label}</span>}
                 </div>
                 {b.rating>0&&<div className="bc-rating">{"★".repeat(Math.round(b.rating/2))} {b.rating}/10</div>}
               </div>
@@ -1347,9 +1481,15 @@ Give me: dose, ${method==="espresso"?"yield, time, temp, pre-brew":(method==="mo
             <input style={{flex:1,minWidth:0,background:"var(--bg3)",border:"1px solid var(--border)",color:"var(--text)",fontFamily:"'DM Mono',monospace",fontSize:14,padding:"9px 11px",outline:"none",WebkitAppearance:"none",borderRadius:0}} placeholder="Paste roaster product URL..." value={urlInput} onChange={e=>setUrlInput(e.target.value)}/>
             <button className="btn ai" onClick={importUrl} disabled={urlLoading||!urlInput.trim()}>{urlLoading?"...":"Import"}</button>
           </div>
-          {urlLoading&&<div className="ai-loading"><div className="ai-dot"/><div className="ai-dot"/><div className="ai-dot"/></div>}
-          {urlImport&&!urlImport.error&&<div style={{background:"#1a2818",border:"1px solid #3a5a28",padding:10,marginBottom:10,fontSize:11,color:"var(--green)",lineHeight:1.6}}>✓ {urlImport.name} by {urlImport.roaster}</div>}
-          {urlImport?.error&&<div style={{color:"var(--red)",fontSize:11,marginBottom:10}}>{urlImport.error}</div>}
+          {urlLoading&&<><div className="ai-loading"><div className="ai-dot"/><div className="ai-dot"/><div className="ai-dot"/></div><div style={{fontSize:11,color:"var(--muted)",marginBottom:10}}>Reading the page. This can take 10 to 20 seconds.</div></>}
+          {urlImport&&!urlImport.error&&<div style={{background:"#1a2818",border:"1px solid #3a5a28",padding:10,marginBottom:10,fontSize:11,color:"var(--green)",lineHeight:1.6}}>✓ {urlImport.name||"Bean"}{urlImport.roaster?" by "+urlImport.roaster:""} · filled {urlImport._count} fields. Check them below.</div>}
+          {urlImport?.error&&<div style={{color:"var(--red)",fontSize:12,marginBottom:10,lineHeight:1.5}}>{urlImport.error}</div>}
+          {(urlImport?.error||urlPaste)&&urlImport?.code!=="nokey"&&<div style={{marginBottom:10}}>
+            <div className="sec-lbl" style={{marginBottom:6}}>Or paste the page text</div>
+            <div style={{fontSize:11,color:"var(--muted)",marginBottom:6}}>Open the product page, select all, copy, and paste it here.</div>
+            <textarea style={{width:"100%",height:90,background:"var(--bg3)",border:"1px solid var(--border)",color:"var(--text)",fontFamily:"'DM Mono',monospace",fontSize:13,padding:"9px 11px",outline:"none",resize:"vertical",borderRadius:0,boxSizing:"border-box"}} placeholder="Paste the product page text here..." value={urlPaste} onChange={e=>setUrlPaste(e.target.value)}/>
+            <button className="btn ai" style={{marginTop:6}} onClick={importUrlText} disabled={urlLoading||!urlPaste.trim()}>{urlLoading?"...":"Extract from text"}</button>
+          </div>}
           <div className="div"/>
         </div>
         <EditForm draft={draft} setDraft={setDraft} method={method} updDraftM={updDraftM} adding={adding} saveNew={saveNew} saveEdit={saveEdit} setAdding={setAdding} setShowList={setShowList} setEditing={setEditing}/>
@@ -1375,7 +1515,7 @@ Give me: dose, ${method==="espresso"?"yield, time, temp, pre-brew":(method==="mo
             <div className="bean-hero-content">
               <div className="bean-title">{cur.name}</div>
               <div className="bean-roaster-lbl">{cur.roaster}</div>
-              {cur.roastDate&&<div className="roast-date">{daysAgo(cur.roastDate)||fmtDate(cur.roastDate)}{daysAgo(cur.roastDate)&&<span className="roast-date-exact"> · {fmtDate(cur.roastDate)}</span>}{freshness(cur.roastDate,cur.frozen)&&<span className="fresh-badge" style={{color:freshness(cur.roastDate,cur.frozen).color,borderColor:freshness(cur.roastDate,cur.frozen).color}}>{freshness(cur.roastDate,cur.frozen).label}</span>}</div>}
+              {cur.roastDate&&<div className="roast-date">{ageLabel(cur)||fmtDate(cur.roastDate)}{ageLabel(cur)&&<span className="roast-date-exact"> · roasted {fmtDate(cur.roastDate)}</span>}{cur.frozenOn&&<span className="roast-date-exact"> · frozen {fmtDate(cur.frozenOn)}{cur.thawedOn?", out "+fmtDate(cur.thawedOn):""}</span>}{freshness(cur)&&<span className="fresh-badge" style={{color:freshness(cur).color,borderColor:freshness(cur).color}}>{freshness(cur).label}</span>}</div>}
               <div className="bean-actions">
                 <button className="btn sm" style={{borderColor:cur.inStock!==false?"#3a5a28":"#5a2a2a",color:cur.inStock!==false?"var(--green)":"var(--red)"}} onClick={()=>updB("inStock",cur.inStock===false)}>
                   {cur.inStock!==false?"✓ In Stock":"✗ Out of Stock"}
@@ -1383,8 +1523,8 @@ Give me: dose, ${method==="espresso"?"yield, time, temp, pre-brew":(method==="mo
                 <button className="btn sm" style={{borderColor:"#3a4a6a",color:"var(--blue)",background:cur.currentlyBrewing?"#1a2038":"transparent"}} onClick={()=>upd(bs=>bs.map(b=>({...b,currentlyBrewing:b.id===selId?!cur.currentlyBrewing:(!cur.currentlyBrewing?false:b.currentlyBrewing)})))}>
                   {cur.currentlyBrewing?"☕ Brewing Now":"Set as Current"}
                 </button>
-                <button className="btn sm" style={{borderColor:"#3a5a7a",color:"var(--blue)",background:cur.frozen?"#1a2838":"transparent"}} onClick={()=>updB("frozen",!cur.frozen)}>
-                  {cur.frozen?"❄ Frozen":"Mark Frozen"}
+                <button className="btn sm" style={{borderColor:"#3a5a7a",color:"var(--blue)",background:isFrozen(cur)?"#1a2838":"transparent"}} onClick={()=>setFreezerDlg({frozenOn:cur.frozenOn||todayISO(),thawedOn:cur.thawedOn||""})}>
+                  {isFrozen(cur)?"❄ Frozen":cur.frozenOn?"❄ Freezer dates":"Mark Frozen"}
                 </button>
               </div>
               <div className="pills">
@@ -1865,6 +2005,23 @@ Give me: dose, ${method==="espresso"?"yield, time, temp, pre-brew":(method==="mo
         </div>
         <div style={{borderTop:"1px solid var(--border)",paddingTop:12}}>
           <button className="btn ai" style={{width:"100%"}} onClick={async()=>{window._COFFEE_API_KEY=apiKeyInput.trim()||window._COFFEE_API_KEY;const r=await callClaude("You are a helpful assistant.","Say only: API key working!");alert(r);}}>Test Connection</button>
+        </div>
+      </div>
+    </div>}
+
+    {freezerDlg&&cur&&<div className="modal-overlay" onClick={()=>setFreezerDlg(null)}>
+      <div className="modal" onClick={e=>e.stopPropagation()}>
+        <h2>❄ Freezer</h2>
+        <p>While beans are frozen their age stops counting. When you take some out, the age picks up from where it stopped. {cur.roastDate?"Roasted "+fmtDate(cur.roastDate)+".":"Add a roast date to this bean so the age can be worked out."}</p>
+        <div className="field"><label>Frozen on</label><input type="date" value={freezerDlg.frozenOn} onChange={e=>setFreezerDlg(d=>({...d,frozenOn:e.target.value}))}/></div>
+        <div className="field" style={{marginTop:10}}><label>Taken out on (leave blank if still frozen)</label><input type="date" value={freezerDlg.thawedOn} onChange={e=>setFreezerDlg(d=>({...d,thawedOn:e.target.value}))}/></div>
+        <p style={{fontSize:12,marginTop:8}}>Pulling a new portion later? Open this again and set Taken out to that day.</p>
+        {freezerDlg.frozenOn&&(()=>{const preview=effectiveAge({roastDate:cur.roastDate,frozenOn:freezerDlg.frozenOn,thawedOn:freezerDlg.thawedOn});return preview===null?null:<p style={{color:"var(--green)",fontSize:13}}>{freezerDlg.thawedOn?"Counts as "+preview+" days of age right now.":"Frozen at "+preview+" days of age."}</p>;})()}
+        <div className="fa" style={{marginTop:10,flexWrap:"wrap"}}>
+          <button className="btn p" onClick={saveFreezer}>Save</button>
+          {freezerDlg.frozenOn&&!freezerDlg.thawedOn&&<button className="btn" onClick={()=>setFreezerDlg(d=>({...d,thawedOn:todayISO()}))}>Take out today</button>}
+          {(cur.frozenOn||cur.frozen)&&<button className="btn d" onClick={clearFreezer}>Clear</button>}
+          <button className="btn" onClick={()=>setFreezerDlg(null)}>Cancel</button>
         </div>
       </div>
     </div>}
