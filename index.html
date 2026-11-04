@@ -46,10 +46,12 @@ const BLOOM_T=["20","25","30","35","40","45","50","60"].map(v=>({value:v,label:v
 
 // ── STORAGE ────────────────────────────────────────────────────────────────
 function migrate(b){
-  return{roastDate:"",imageUrl:"",imageBase64:"",imageOffsetX:50,imageOffsetY:50,imageZoom:100,rating:0,altitude:"",varietal:"",flavorProfile:"",inStock:true,currentlyBrewing:false,frozen:false,frozenOn:"",thawedOn:"",savedRecipes:{aeropress:[],pourover:[],moccamaster:[]},...b,
+  return{roastDate:"",imageUrl:"",imageBase64:"",imageOffsetX:50,imageOffsetY:50,imageZoom:100,rating:0,altitude:"",varietal:"",flavorProfile:"",inStock:true,currentlyBrewing:false,frozen:false,frozenOn:"",thawedOn:"",price:"",bagGrams:"",remainingG:"",savedRecipes:{aeropress:[],pourover:[],moccamaster:[]},...b,
     methods:{espresso:{...DEF.espresso,...(b.methods?.espresso||{})},aeropress:{...DEF.aeropress,...(b.methods?.aeropress||{})},pourover:{...DEF.pourover,...(b.methods?.pourover||{})},moccamaster:{...DEF.moccamaster,...(b.methods?.moccamaster||{})}},
     grindLogs:{espresso:b.grindLogs?.espresso||[],aeropress:b.grindLogs?.aeropress||[],pourover:b.grindLogs?.pourover||[],moccamaster:b.grindLogs?.moccamaster||[]},
-    savedRecipes:{aeropress:[],pourover:[],moccamaster:[],...(b.savedRecipes||{})}};
+    savedRecipes:{aeropress:[],pourover:[],moccamaster:[],...(b.savedRecipes||{})},
+    shots:{espresso:[],aeropress:[],pourover:[],moccamaster:[],...(b.shots||{})},
+    dialed:{espresso:null,aeropress:null,pourover:null,moccamaster:null,...(b.dialed||{})}};
 }
 // If stored data exists but can't be read, we must NOT let the app overwrite it with an empty list.
 let LOAD_FAILED=false;
@@ -170,6 +172,448 @@ function titleCase(s){
     return w.charAt(0).toUpperCase()+w.slice(1);
   }).join(" ");
 }
+
+// ── ROASTER NAMES (one canonical spelling per roaster) ─────────────────────
+const ROASTER_FILLER=new Set(["coffee","coffees","roasters","roaster","roasting","roastery","roastworks","co","company","cafe","the","and","inc","llc"]);
+function rKey(s){
+  if(!s)return"";
+  const raw=String(s).normalize("NFD").replace(/[̀-ͯ]/g,"").toLowerCase().replace(/&/g," and ").replace(/[^a-z0-9 ]+/g," ");
+  const parts=raw.split(/\s+/).filter(w=>w&&!ROASTER_FILLER.has(w));
+  return parts.length?parts.join(""):raw.replace(/\s+/g,"");
+}
+function lev(a,b){
+  if(a===b)return 0;if(!a.length)return b.length;if(!b.length)return a.length;
+  let prev=Array.from({length:b.length+1},(_,i)=>i);
+  for(let i=1;i<=a.length;i++){
+    const cur=[i];
+    for(let j=1;j<=b.length;j++)cur[j]=Math.min(prev[j]+1,cur[j-1]+1,prev[j-1]+(a[i-1]===b[j-1]?0:1));
+    prev=cur;
+  }
+  return prev[b.length];
+}
+const isShouty=s=>s===s.toUpperCase()&&/[A-Z]/.test(s);
+const isFlat=s=>s===s.toLowerCase()&&/[a-z]/.test(s);
+function roasterGroups(names){
+  const m={};
+  (names||[]).forEach(n=>{
+    const raw=(n||"").trim();if(!raw)return;
+    const k=rKey(raw);if(!k)return;
+    const g=m[k]||(m[k]={key:k,variants:{},n:0});
+    g.variants[raw]=(g.variants[raw]||0)+1;g.n++;
+  });
+  return Object.values(m).map(g=>{
+    const vs=Object.entries(g.variants).sort((a,b)=>{
+      const pa=(isShouty(a[0])||isFlat(a[0]))?0:1,pb=(isShouty(b[0])||isFlat(b[0]))?0:1;
+      return b[1]-a[1]||pb-pa||b[0].length-a[0].length;
+    });
+    return{key:g.key,name:titleCase(vs[0][0]),variants:vs.map(v=>v[0]),n:g.n,mixed:vs.length>1};
+  }).sort((a,b)=>b.n-a.n||a.name.localeCompare(b.name));
+}
+// Returns the canonical spelling if this roaster already exists, otherwise a tidy Title Case version.
+function snapRoaster(name,groups){
+  const raw=(name||"").trim();if(!raw)return raw;
+  const k=rKey(raw);
+  const g=(groups||[]).find(x=>x.key===k);
+  return g?g.name:titleCase(raw);
+}
+// A close-but-not-identical existing roaster (probable typo), or null.
+function similarRoaster(name,groups){
+  const k=rKey(name);if(k.length<4)return null;
+  let best=null,bd=99;
+  (groups||[]).forEach(g=>{if(g.key===k)return;const d=lev(k,g.key);const lim=k.length>=9?2:1;if(d<=lim&&d<bd){bd=d;best=g;}});
+  return best;
+}
+// Per-roaster ratings. Small samples are pulled toward your overall average so one 9.5 does not beat five 9.0s.
+function roasterStats(beans,awayLog){
+  const items=[
+    ...beans.map(b=>({roaster:b.roaster,name:b.name,rating:b.rating||0,inStock:b.inStock!==false,source:"Your Beans",origin:b.origin,process:b.process,roast:b.roast})),
+    ...awayLog.map(a=>({roaster:a.roaster,name:a.name,rating:a.rating||0,inStock:false,source:"Tasting Log",origin:a.origin,process:a.process,roast:a.roast})),
+  ].filter(i=>rKey(i.roaster));
+  const groups=roasterGroups(items.map(i=>i.roaster));
+  const allRated=items.filter(i=>i.rating>0);
+  const prior=allRated.length?allRated.reduce((s,i)=>s+i.rating,0)/allRated.length:7;
+  const M=2;
+  return groups.map(g=>{
+    const its=items.filter(i=>rKey(i.roaster)===g.key);
+    const rated=its.filter(i=>i.rating>0);
+    const sum=rated.reduce((s,i)=>s+i.rating,0);
+    const sorted=[...rated].sort((a,b)=>b.rating-a.rating);
+    return{k:g.name,key:g.key,variants:g.variants,mixed:g.mixed,n:its.length,rated:rated.length,
+      avg:rated.length?sum/rated.length:0,adj:(sum+prior*M)/(rated.length+M),
+      best:sorted[0]||null,worst:sorted.length>1?sorted[sorted.length-1]:null,
+      inStock:its.filter(i=>i.inStock).length,limited:rated.length<3,items:its};
+  }).sort((a,b)=>b.adj-a.adj||b.n-a.n);
+}
+
+// ── COST & STOCK ───────────────────────────────────────────────────────────
+function num(v){const n=parseFloat(v);return isNaN(n)?null:n;}
+function money(n){return n===null||n===undefined||isNaN(n)?"—":"$"+(n>=100?n.toFixed(0):n.toFixed(2));}
+function costInfo(b,dose){
+  const p=num(b.price),g=num(b.bagGrams);
+  if(!p||!g)return null;
+  const perG=p/g,d=num(dose);
+  return{perG,per250:perG*250,perKg:perG*1000,perDose:d?perG*d:null};
+}
+function stockInfo(b,dose){
+  const g=num(b.bagGrams),r=num(b.remainingG);
+  if(g===null&&r===null)return null;
+  const rem=r!==null?r:g;
+  const pct=g?Math.max(0,Math.min(100,rem/g*100)):null;
+  const d=num(dose)||18;
+  const empty=rem<=0,low=!empty&&(rem<d*2||(pct!==null&&pct<=15));
+  return{rem,total:g,pct,empty,low,doses:Math.floor(rem/d)};
+}
+
+// ── GRIND MATH (X64: whole numbers with 5 dots between, higher = coarser) ──
+function grindIdx(p){return p?p.whole*(DOTS+1)+p.dot:null;}
+function idxToPos(i){const n=Math.max(0,Math.min(GRIND_MAX*(DOTS+1),i));const w=Math.floor(n/(DOTS+1));return{whole:w,dot:w===GRIND_MAX?0:n-w*(DOTS+1)};}
+function shiftGrind(p,steps){const i=grindIdx(p);return i===null?null:idxToPos(i+steps);}
+
+// ── COMPASS ENGINE: tastes → position → ONE next move ──────────────────────
+const TASTE_CHIPS=[
+  {id:"sour",label:"Sour",dx:-22,dy:0},
+  {id:"salty",label:"Salty",dx:-14,dy:6},
+  {id:"bitter",label:"Bitter",dx:22,dy:0},
+  {id:"drying",label:"Drying",dx:16,dy:6},
+  {id:"harsh",label:"Harsh",dx:10,dy:-14},
+  {id:"muddy",label:"Muddy",dx:8,dy:-10},
+  {id:"thin",label:"Thin",dx:0,dy:24},
+  {id:"hollow",label:"Hollow",dx:4,dy:16},
+  {id:"flat",label:"Flat",dx:-6,dy:18},
+  {id:"heavy",label:"Heavy",dx:6,dy:-18},
+  {id:"sweet",label:"Sweet",good:true},
+  {id:"balanced",label:"Balanced",good:true},
+  {id:"juicy",label:"Juicy",good:true},
+];
+function sweetZone(zones){return zones.find(z=>z.id==="sweet_spot")||zones[0];}
+function nearestZone(zones,x,y){let best=null,bd=1e9;zones.forEach(z=>{const d=Math.hypot(z.x-x,z.y-y);if(d<bd){bd=d;best=z;}});return best;}
+// Chips alone can place the shot on the map, so the compass tap becomes optional.
+function inferZone(zones,tastes){
+  const sw=sweetZone(zones);
+  const picked=TASTE_CHIPS.filter(c=>tastes.includes(c.id));
+  if(!picked.length)return null;
+  const neg=picked.filter(c=>!c.good),good=picked.filter(c=>c.good);
+  if(!neg.length)return sw;
+  const k=good.length?0.5:1;
+  const x=sw.x+neg.reduce((s,c)=>s+c.dx,0)*k,y=sw.y+neg.reduce((s,c)=>s+c.dy,0)*k;
+  return nearestZone(zones,x,y);
+}
+const MANUAL_TECHNIQUE_ZONES=["channeled_harsh","channeled_uneven","astringent","astringent_dry","flat","flat_dull","over_diluted","harsh_muddy"];
+const CLOSE_ZONES=["balanced","nuanced","rich_full","bright_clean","rich","clean_light"];
+function fmtSteps(s){return s===0?"hold the grind":(s<0?"finer":"coarser")+" "+Math.abs(s)+(Math.abs(s)===1?" dot":" dots");}
+function nextMove(c){
+  const{method,zone,tastes,time,shots,bean,zones}=c;
+  const has=id=>tastes.includes(id);
+  const sw=sweetZone(zones);
+  const sourish=has("sour")||has("salty"),bitterish=has("bitter")||has("drying")||has("harsh");
+  const dist=Math.hypot(zone.x-sw.x,zone.y-sw.y);
+  const side=sourish&&!bitterish?"under":bitterish&&!sourish?"over":zone.x<45?"under":zone.x>62?"over":"center";
+  const out={title:"",move:"",why:"",steps:0,flags:[],lockable:false,doseNote:""};
+  const sweet=zone.id==="sweet_spot";
+  const bigStep=method==="espresso"?(dist>28?3:2):(dist>26?5:2);
+  const t=time&&time>0?time:null;
+  if(sweet){out.title="Dialed in";out.move="Keep everything exactly the same.";out.why="Sweet, balanced and rich is the target. Lock these settings in so you do not drift.";out.lockable=true;}
+  else if(CLOSE_ZONES.includes(zone.id)&&side==="center"){
+    out.title="Very close";out.lockable=true;
+    out.move="Leave it, or make one tiny change: "+fmtSteps(zone.x<sw.x?-1:1)+". If you like the cup, lock it in.";
+    out.steps=0;out.why=zone.fix;
+  }
+  else if(method==="espresso"){
+    if(t&&t>35&&(side==="under"||sourish)){out.title="Slow and sour: channeling";out.move="Do not go finer. Fix puck prep first: even distribution, level tamp, screen fully seated. If the portafilter will not lock in with the screen, drop the dose 0.5 to 1g.";out.why="A shot over 35 seconds that tastes sour is usually uneven extraction, not a grind that is too coarse.";}
+    else if(t&&t<22&&bitterish){out.title="Fast but bitter: channeling";out.move="Fix distribution first. If the puck is clean and it still runs fast, go finer 1 dot.";out.steps=0;out.why="Bitter plus fast means water is finding a shortcut.";}
+    else if(t&&t<22){out.title="Running fast";out.steps=-bigStep;out.move="Go "+fmtSteps(-bigStep)+". Do not go coarser.";out.why="Under 22 seconds is under-extracted almost every time.";}
+    else if(side==="under"){out.title="Under-extracted";out.steps=-bigStep;out.move="Go "+fmtSteps(-bigStep)+", or lengthen the yield by 2 to 4g.";out.why=zone.fix;}
+    else if(side==="over"){out.title="Over-extracted";out.steps=t&&t<22?0:bigStep;out.move=t&&t<22?"Fix puck prep, do not go coarser.":"Go "+fmtSteps(bigStep)+", or shorten the yield by 2 to 4g.";out.why=zone.fix;}
+    else if(zone.y>58||has("thin")||has("hollow")){out.title="Weak and thin";out.move="Raise the dose 0.5g or shorten the yield by 2 to 4g. Keep the grind where it is.";out.why=zone.fix;}
+    else{out.title=zone.label;out.move=zone.fix;out.why=zone.desc;}
+  }
+  else{
+    if(MANUAL_TECHNIQUE_ZONES.includes(zone.id)){out.title=zone.label;out.move=zone.fix;out.why="This is a technique problem more than a grind problem, so keep the grind where it is.";}
+    else if(zone.id==="stalled_bitter"){out.title="Choking the bed";out.steps=5;out.move="Go "+fmtSteps(5)+".";out.why=zone.fix;}
+    else if(side==="under"){out.title="Under-extracted";out.steps=-bigStep;out.move="Go "+fmtSteps(-bigStep)+".";out.why=zone.fix;}
+    else if(side==="over"){out.title="Over-extracted";out.steps=bigStep;out.move="Go "+fmtSteps(bigStep)+".";out.why=zone.fix;}
+    else{out.title=zone.label;out.move=zone.fix;out.why=zone.desc;}
+  }
+  // Flags: what is muddying this dial-in
+  const hist=(shots||[]).slice(-4);
+  const idxs=hist.map(s=>grindIdx(s.grind)).filter(v=>v!==null);
+  let flips=0;for(let i=2;i<idxs.length;i++){const a=idxs[i-1]-idxs[i-2],b=idxs[i]-idxs[i-1];if(a&&b&&Math.sign(a)!==Math.sign(b))flips++;}
+  if(flips>=1)out.flags.push("The grind has been going back and forth. Change one thing at a time, then pull two shots before judging.");
+  const doses=[...new Set(hist.slice(-3).map(s=>String(s.dose||"")).filter(Boolean))];
+  if(doses.length>1)out.flags.push("The dose changed between shots, which hides what the grind is doing. Pick one dose and hold it.");
+  if(bean&&bean.thawedOn){const d=dayDiff(bean.thawedOn,todayISO());if(d!==null&&d>=0&&d<=5)out.flags.push("Thawed "+(d===0?"today":d+(d===1?" day":" days")+" ago")+". Freshly thawed beans run uneven for a few days, so hold your settings steady.");}
+  else if(bean){const a=effectiveAge(bean);if(a!==null&&a<5&&!isFrozen(bean))out.flags.push("Very fresh beans (day "+a+") are erratic. Give them a few more days before chasing the grind.");}
+  // Trend vs last shot
+  const prev=hist[hist.length-1];
+  if(prev&&prev.zone){const pz=zones.find(z=>z.id===prev.zone);if(pz){const pd=Math.hypot(pz.x-sw.x,pz.y-sw.y);const diff=pd-dist;
+    if(diff>4)out.trend={good:true,text:"Closer to the sweet spot than last shot."+(prev.move?" The last move ("+prev.move+") worked.":"")};
+    else if(diff<-4)out.trend={good:false,text:"Further from the sweet spot than last shot."+(prev.move&&prev.move!=="hold the grind"?" Undo the last move ("+prev.move+").":"")};}}
+  return out;
+}
+
+function CompassV2({zones,selected,onSelect,trail}){
+  const ref=useRef(null);
+  const sw=sweetZone(zones);
+  const tap=e=>{
+    const r=ref.current.getBoundingClientRect();
+    const cx=(e.clientX-r.left)/r.width*100,cy=(e.clientY-r.top)/r.height*100;
+    const z=nearestZone(zones,cx,cy);
+    if(z)onSelect(selected&&selected.id===z.id?null:z);
+  };
+  const short=l=>l.replace(" ✓","").length>15?l.replace(" ✓","").slice(0,14)+".":l.replace(" ✓","");
+  const pts=(trail||[]).map(s=>zones.find(z=>z.id===s.zone)).filter(Boolean);
+  return<div className="cv2">
+    <svg ref={ref} viewBox="0 0 100 100" className="cv2-svg" onClick={tap}>
+      <defs>
+        <radialGradient id="cv-sw" cx={sw.x} cy={sw.y} r="34" gradientUnits="userSpaceOnUse"><stop offset="0" stopColor="#70b870" stopOpacity=".6"/><stop offset=".55" stopColor="#70b870" stopOpacity=".2"/><stop offset="1" stopColor="#70b870" stopOpacity="0"/></radialGradient>
+        <radialGradient id="cv-un" cx="4" cy="38" r="48" gradientUnits="userSpaceOnUse"><stop offset="0" stopColor="#d8c040" stopOpacity=".42"/><stop offset="1" stopColor="#d8c040" stopOpacity="0"/></radialGradient>
+        <radialGradient id="cv-ov" cx="98" cy="62" r="48" gradientUnits="userSpaceOnUse"><stop offset="0" stopColor="#d06040" stopOpacity=".45"/><stop offset="1" stopColor="#d06040" stopOpacity="0"/></radialGradient>
+        <linearGradient id="cv-wk" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stopColor="#789ab8" stopOpacity="0"/><stop offset="1" stopColor="#789ab8" stopOpacity=".18"/></linearGradient>
+      </defs>
+      <rect x="0.5" y="0.5" width="99" height="99" rx="5" fill="#15100b" stroke="#4a3b2a" strokeWidth="0.6"/>
+      <rect x="0.5" y="0.5" width="99" height="99" rx="5" fill="url(#cv-wk)"/>
+      <rect x="0.5" y="0.5" width="99" height="99" rx="5" fill="url(#cv-un)"/>
+      <rect x="0.5" y="0.5" width="99" height="99" rx="5" fill="url(#cv-ov)"/>
+      <rect x="0.5" y="0.5" width="99" height="99" rx="5" fill="url(#cv-sw)"/>
+      <line x1="50" y1="6" x2="50" y2="94" stroke="#3a2e22" strokeWidth="0.3" strokeDasharray="1 2"/>
+      <line x1="6" y1="50" x2="94" y2="50" stroke="#3a2e22" strokeWidth="0.3" strokeDasharray="1 2"/>
+      {[9,19,29].map(r=><circle key={r} cx={sw.x} cy={sw.y} r={r} fill="none" stroke="#70b870" strokeOpacity={0.22-r/200} strokeWidth="0.35"/>)}
+      <text x="5" y="7" fontSize="3.1" fill="#b8a050" letterSpacing=".4">SOUR · UNDER</text>
+      <text x="95" y="7" fontSize="3.1" fill="#c87858" textAnchor="end" letterSpacing=".4">BITTER · OVER</text>
+      <text x="50" y="97.5" fontSize="3" fill="#7a8ea0" textAnchor="middle" letterSpacing=".4">WEAK</text>
+      <text x="50" y="12" fontSize="3" fill="#8a7358" textAnchor="middle" letterSpacing=".4">STRONG</text>
+      {pts.length>1&&<polyline points={pts.map(p=>p.x+","+p.y).join(" ")} fill="none" stroke="#d4aa7a" strokeOpacity=".65" strokeWidth=".7" strokeDasharray="1.6 1.4"/>}
+      {zones.map(z=>{const on=selected&&selected.id===z.id;return<g key={z.id} style={{cursor:"pointer"}}>
+        <circle cx={z.x} cy={z.y} r={on?3.4:1.9} fill={z.color} opacity={on?1:.55} stroke={on?"#fff":"none"} strokeWidth=".9"/>
+        {on&&<circle cx={z.x} cy={z.y} r="3.4" fill="none" stroke="#fff" strokeOpacity=".7" strokeWidth=".5"><animate attributeName="r" values="3.4;8;3.4" dur="2.2s" repeatCount="indefinite"/><animate attributeName="stroke-opacity" values=".7;0;.7" dur="2.2s" repeatCount="indefinite"/></circle>}
+        <text x={z.x} y={z.y+(on?7.4:5)} fontSize={on?3.3:2.5} textAnchor="middle" fill={on?"#fff":"#8a7358"} fontWeight={on?"700":"400"} style={{pointerEvents:"none"}}>{short(z.label)}</text>
+      </g>;})}
+      {pts.map((p,i)=><g key={"t"+i} style={{pointerEvents:"none"}}><circle cx={p.x} cy={p.y} r="2.6" fill="#d4aa7a" fillOpacity={0.35+0.6*(i+1)/pts.length} stroke="#15100b" strokeWidth=".4"/><text x={p.x} y={p.y} fontSize="2.6" fontWeight="700" fill="#15100b" textAnchor="middle" dominantBaseline="central">{i+1}</text></g>)}
+      <text x={sw.x} y={sw.y-5.2} fontSize="3.6" fill="#90d890" textAnchor="middle" style={{pointerEvents:"none"}}>✓</text>
+    </svg>
+  </div>;
+}
+
+// ── ROASTER FIELD (autocomplete so spellings never drift) ──────────────────
+function RoasterField({value,onChange,groups}){
+  const v=(value||"").trim(),low=v.toLowerCase(),k=rKey(v);
+  const exact=k?groups.find(g=>g.key===k):null;
+  const matches=low?groups.filter(g=>g.name!==value&&(g.name.toLowerCase().includes(low)||(k.length>=2&&g.key.includes(k)))).slice(0,4):[];
+  const typo=!exact&&v?similarRoaster(v,groups):null;
+  return<div className="field"><label>Roaster</label>
+    <input value={value||""} onChange={e=>onChange(e.target.value)} placeholder="Type, existing roasters appear" autoCapitalize="words" autoCorrect="off"/>
+    {matches.length>0&&<div className="rf-sugg">{matches.map(g=><button key={g.key} type="button" className="rf-chip" onClick={()=>onChange(g.name)}>{g.name}<span className="rf-n">{g.n}</span></button>)}</div>}
+    {typo&&!matches.some(g=>g.key===typo.key)&&<div className="rf-note">Did you mean <button type="button" className="rf-link" onClick={()=>onChange(typo.name)}>{typo.name}</button>?</div>}
+    {exact&&exact.name!==value&&<div className="rf-note">Will save as {exact.name}</div>}
+  </div>;
+}
+
+// ── BREW CARD (shareable image) ────────────────────────────────────────────
+function wrapText(ctx,text,maxW){
+  const words=String(text||"").split(/\s+/).filter(Boolean),lines=[];let line="";
+  words.forEach(w=>{const t=line?line+" "+w:w;if(ctx.measureText(t).width>maxW&&line){lines.push(line);line=w;}else line=t;});
+  if(line)lines.push(line);return lines;
+}
+function loadImg(src){
+  return new Promise(res=>{if(!src)return res(null);const im=new Image();if(!/^data:/.test(src))im.crossOrigin="anonymous";im.onload=()=>res(im);im.onerror=()=>res(null);im.src=src;});
+}
+async function drawBrewCard(bean,method,dialed){
+  try{await Promise.all([document.fonts.load('700 70px "Playfair Display"'),document.fonts.load('400 30px "DM Mono"')]);}catch(e){}
+  const W=1080,H=1350,c=document.createElement("canvas");c.width=W;c.height=H;const x=c.getContext("2d");
+  const g=x.createLinearGradient(0,0,0,H);g.addColorStop(0,"#1c1510");g.addColorStop(1,"#120d09");x.fillStyle=g;x.fillRect(0,0,W,H);
+  x.strokeStyle="#d4aa7a";x.globalAlpha=.55;x.lineWidth=2;x.strokeRect(36,36,W-72,H-72);x.globalAlpha=1;
+  x.fillStyle="#8a7358";x.font='400 26px "DM Mono",monospace';x.textAlign="center";
+  if(x.letterSpacing!==undefined)x.letterSpacing="8px";
+  x.fillText("COFFEE LOG",W/2,102);if(x.letterSpacing!==undefined)x.letterSpacing="0px";
+  // bag image
+  const im=await loadImg(bean.imageBase64||bean.imageUrl);
+  const S=460,ix=(W-S)/2,iy=140;
+  x.save();x.beginPath();x.roundRect?x.roundRect(ix,iy,S,S,28):x.rect(ix,iy,S,S);x.clip();
+  if(im){const r=Math.max(S/im.width,S/im.height);const dw=im.width*r,dh=im.height*r;x.fillStyle="#fff";x.fillRect(ix,iy,S,S);x.drawImage(im,ix+(S-dw)*((bean.imageOffsetX??50)/100),iy+(S-dh)*((bean.imageOffsetY??50)/100),dw,dh);}
+  else{x.fillStyle="#241c10";x.fillRect(ix,iy,S,S);x.fillStyle="#6a5540";x.font='400 150px serif';x.fillText("☕",W/2,iy+S/2+50);}
+  x.restore();
+  let y=iy+S+86;
+  x.fillStyle="#f0e8dc";x.font='700 66px "Playfair Display",serif';x.textAlign="center";
+  wrapText(x,bean.name||"Coffee",W-160).slice(0,2).forEach(l=>{x.fillText(l,W/2,y);y+=76;});
+  x.fillStyle="#d4aa7a";x.font='400 32px "DM Mono",monospace';x.fillText((bean.roaster||"").toUpperCase(),W/2,y-6);y+=34;
+  x.fillStyle="#a89578";x.font='400 28px "DM Mono",monospace';
+  const meta=[bean.origin,bean.process,bean.roast].filter(Boolean).join("  ·  ");
+  if(meta){wrapText(x,meta,W-160).slice(0,2).forEach(l=>{x.fillText(l,W/2,y+10);y+=38;});}
+  if(bean.rating>0){x.fillStyle="#d4aa7a";x.font='400 40px serif';const st="★".repeat(Math.round(bean.rating/2))+"☆".repeat(5-Math.round(bean.rating/2));x.fillText(st+"  "+(+bean.rating).toFixed(2).replace(/\.?0+$/,"")+"/10",W/2,y+52);y+=70;}
+  // recipe panel
+  const md=bean.methods?.[method]||{},d=dialed||null;
+  const cells=[];
+  const grind=d?.grind||(bean.grindLogs?.[method]?.slice(-1)[0]?grindLabel(bean.grindLogs[method].slice(-1)[0].position):"");
+  if(method==="espresso")cells.push(["DOSE",md.dose+"g"],["YIELD",md.yield+"g"],["TIME",md.time+"s"],["TEMP",md.temp+"°F"]);
+  else if(method==="aeropress")cells.push(["DOSE",md.dose+"g"],["WATER",md.water+"g"],["TEMP",md.temp+"°F"],["STEEP",md.steepTime+"s"]);
+  else if(method==="pourover")cells.push(["DOSE",md.dose+"g"],["WATER",md.water+"g"],["TEMP",md.temp+"°F"],["TIME",md.totalTime||"—"]);
+  else cells.push(["DOSE",md.dose+"g"],["WATER",md.water+"ml"],["RATIO",ratioStr(md.dose,md.water)],["TIME",md.totalTime||"—"]);
+  if(grind)cells.push(["GRIND",grind]);
+  const py=Math.max(y+14,880),ph=H-py-130;
+  x.fillStyle="#1f1812";x.strokeStyle="#3a2e22";x.lineWidth=2;x.beginPath();x.roundRect?x.roundRect(80,py,W-160,ph,22):x.rect(80,py,W-160,ph);x.fill();x.stroke();
+  x.fillStyle="#8a7358";x.font='400 24px "DM Mono",monospace';x.fillText((METHOD_LABELS[method]+(d?"  ·  DIALED IN":"")).toUpperCase(),W/2,py+46);
+  const n=cells.length,cw=(W-200)/n;
+  cells.forEach((cl,i)=>{const cx=100+cw*i+cw/2;x.fillStyle="#f0e8dc";x.font=(cl[1].length>6?'500 38px':'500 46px')+' "DM Mono",monospace';x.fillText(cl[1],cx,py+112);x.fillStyle="#8a7358";x.font='400 20px "DM Mono",monospace';x.fillText(cl[0],cx,py+146);});
+  const notes=bean.flavorProfile||md.notes||"";
+  if(notes){x.fillStyle="#a89578";x.font='italic 400 26px "DM Mono",monospace';let ny=py+196;wrapText(x,notes,W-220).slice(0,Math.max(1,Math.floor((ph-190)/34))).forEach(l=>{x.fillText(l,W/2,ny);ny+=34;});}
+  x.fillStyle="#6a5540";x.font='400 22px "DM Mono",monospace';x.fillText("made with Coffee Log",W/2,H-70);
+  return c;
+}
+function BrewCardModal({bean,method,dialed,onClose}){
+  const[url,setUrl]=useState("");const[blob,setBlob]=useState(null);const[err,setErr]=useState("");const[msg,setMsg]=useState("");
+  useEffect(()=>{let dead=false;drawBrewCard(bean,method,dialed).then(c=>{if(dead)return;try{setUrl(c.toDataURL("image/png"));c.toBlob(b=>{if(!dead)setBlob(b);},"image/png");}catch(e){setErr("Couldn't build the image.");}}).catch(()=>setErr("Couldn't build the image."));return()=>{dead=true;};},[]);
+  const fname=(bean.name||"coffee").toLowerCase().replace(/[^a-z0-9]+/g,"-")+"-"+method+".png";
+  const share=async()=>{
+    if(!blob)return;
+    try{const f=new File([blob],fname,{type:"image/png"});if(navigator.canShare&&navigator.canShare({files:[f]})){await navigator.share({files:[f],title:bean.name});return;}}catch(e){if(e&&e.name==="AbortError")return;}
+    save();
+  };
+  const save=()=>{if(!blob)return;const u=URL.createObjectURL(blob);const a=document.createElement("a");a.href=u;a.download=fname;document.body.appendChild(a);a.click();document.body.removeChild(a);setTimeout(()=>URL.revokeObjectURL(u),4000);setMsg("Saved.");};
+  return<div className="modal-overlay" onClick={onClose}>
+    <div className="modal" style={{maxWidth:420}} onClick={e=>e.stopPropagation()}>
+      <h2>Brew Card</h2>
+      {err&&<div style={{color:"var(--red)",fontSize:13,margin:"10px 0"}}>{err}</div>}
+      {!url&&!err&&<div className="ai-loading" style={{margin:"20px 0"}}><div className="ai-dot"/><div className="ai-dot"/><div className="ai-dot"/></div>}
+      {url&&<img src={url} alt="Brew card" style={{width:"100%",borderRadius:10,border:"1px solid var(--border)",marginTop:10}}/>}
+      {msg&&<div style={{fontSize:12,color:"var(--green)",marginTop:8}}>{msg}</div>}
+      <div className="fa" style={{marginTop:14}}>
+        <button className="btn p" disabled={!blob} onClick={share}>Share</button>
+        <button className="btn" disabled={!blob} onClick={save}>Save Image</button>
+        <button className="btn" onClick={onClose}>Close</button>
+      </div>
+    </div>
+  </div>;
+}
+
+// ── STATS ──────────────────────────────────────────────────────────────────
+function StatsScreen({beans,awayLog,matches}){
+  const rs=roasterStats(beans,awayLog);
+  const rated=beans.filter(b=>b.rating>0);
+  const avg=rated.length?rated.reduce((s,b)=>s+b.rating,0)/rated.length:null;
+  const allShots=[];beans.forEach(b=>METHODS.forEach(m=>(b.shots?.[m]||[]).forEach(s=>allShots.push({...s,method:m,bean:b.name}))));
+  const dialed=[];beans.forEach(b=>METHODS.forEach(m=>{const d=b.dialed?.[m];if(d)dialed.push({bean:b,method:m,d});}));
+  const priced=beans.filter(b=>num(b.price)&&num(b.bagGrams));
+  const spend=priced.reduce((s,b)=>s+num(b.price),0),grams=priced.reduce((s,b)=>s+num(b.bagGrams),0);
+  const perDoseList=priced.map(b=>costInfo(b,b.methods?.espresso?.dose)).filter(c=>c&&c.perDose).map(c=>c.perDose);
+  const avgDose=perDoseList.length?perDoseList.reduce((a,b)=>a+b,0)/perDoseList.length:null;
+  const low=beans.filter(b=>b.inStock!==false).map(b=>({b,s:stockInfo(b,b.methods?.espresso?.dose)})).filter(x=>x.s&&(x.s.low||x.s.empty));
+  const byMethod=METHODS.map(m=>({m,n:allShots.filter(s=>s.method===m).length}));
+  const maxM=Math.max(1,...byMethod.map(x=>x.n));
+  const months=[];const now=new Date();
+  for(let i=5;i>=0;i--){const d=new Date(now.getFullYear(),now.getMonth()-i,1);months.push({key:d.getFullYear()+"-"+String(d.getMonth()+1).padStart(2,"0"),label:d.toLocaleString("en-US",{month:"short"}),n:0});}
+  allShots.forEach(s=>{const k=String(s.date||"").slice(0,7);const mo=months.find(x=>x.key===k);if(mo)mo.n++;});
+  const maxMo=Math.max(1,...months.map(x=>x.n));
+  const origins=new Set(beans.map(b=>(b.origin||"").trim()).filter(Boolean));
+  const procs=new Set(beans.map(b=>(b.process||"").trim()).filter(Boolean));
+  const fav=[...rated].sort((a,b)=>b.rating-a.rating).slice(0,3);
+  return<div className="tc">
+    <div className="sec-lbl" style={{marginBottom:4}}>Your Coffee Year</div>
+    <div className="sec-txt" style={{marginBottom:14,fontSize:12}}>Everything you have logged so far.</div>
+    <div className="stat-row" style={{gridTemplateColumns:"repeat(2,1fr)"}}>
+      <div className="stat-box"><div className="stat-num">{beans.length}</div><div className="stat-lbl">Beans Logged</div></div>
+      <div className="stat-box"><div className="stat-num">{avg?avg.toFixed(1):"—"}</div><div className="stat-lbl">Avg Rating</div></div>
+      <div className="stat-box"><div className="stat-num">{allShots.length}</div><div className="stat-lbl">Dial-In Shots</div></div>
+      <div className="stat-box"><div className="stat-num">{dialed.length}</div><div className="stat-lbl">Dialed In</div></div>
+    </div>
+    <div className="sec-lbl" style={{margin:"18px 0 8px"}}>Dial-In Activity</div>
+    <div className="bars">{months.map(mo=><div key={mo.key} className="bar-col"><div className="bar-n">{mo.n||""}</div><div className="bar" style={{height:Math.max(3,mo.n/maxMo*70)}}/><div className="bar-l">{mo.label}</div></div>)}</div>
+    <div className="hbars" style={{marginTop:12}}>{byMethod.map(x=><div key={x.m} className="hbar-row"><span className="hbar-l">{METHOD_LABELS[x.m]}</span><span className="hbar-track"><span className="hbar-fill" style={{width:(x.n/maxM*100)+"%"}}/></span><span className="hbar-n">{x.n}</span></div>)}</div>
+
+    {dialed.length>0&&<>
+      <div className="sec-lbl" style={{margin:"20px 0 8px"}}>Your Sweet Spots</div>
+      <div className="gl">{dialed.map((x,i)=><div key={i} className="ge" style={{alignItems:"flex-start"}}>
+        <div><div className="ge-pos" style={{fontSize:15,letterSpacing:0}}>{x.bean.name}</div><div className="ge-date">{x.bean.roaster} · {METHOD_LABELS[x.method]}</div></div>
+        <div style={{textAlign:"right",fontSize:12,color:"var(--text2)",lineHeight:1.5}}>grind {x.d.grind||"—"}<br/>{x.method==="espresso"?`${x.d.dose}g → ${x.d.yield}g · ${x.d.time}s`:x.method==="moccamaster"?`${x.d.dose}g / ${x.d.water}ml`:`${x.d.dose}g / ${x.d.water}g`}</div>
+      </div>)}</div>
+    </>}
+
+    <div className="sec-lbl" style={{margin:"20px 0 8px"}}>Top Roasters</div>
+    {rs.filter(r=>r.rated>0).length===0?<div className="empty-grind">Rate a few beans to rank roasters</div>:
+      <div className="rank-list">{rs.filter(r=>r.rated>0).slice(0,5).map((r,i)=><div key={r.key} className="rank-row" style={{cursor:"default"}}><span className="rank-num">{i+1}</span><span className="rank-lbl">{r.k}</span><span className="rank-n">{r.n} {r.n===1?"bean":"beans"}{r.limited?" · limited data":""}</span><span className="rank-avg">{r.avg.toFixed(1)}</span></div>)}</div>}
+
+    {fav.length>0&&<><div className="sec-lbl" style={{margin:"20px 0 8px"}}>Favorites</div>
+      <div className="rank-list">{fav.map((b,i)=><div key={b.id} className="rank-row" style={{cursor:"default"}}><span className="rank-num">{i+1}</span><span className="rank-lbl">{b.name}</span><span className="rank-n">{b.roaster}</span><span className="rank-avg">{(+b.rating).toFixed(1)}</span></div>)}</div></>}
+
+    <div className="sec-lbl" style={{margin:"20px 0 8px"}}>Range</div>
+    <div className="sec-txt" style={{fontSize:13}}>{origins.size} origins · {procs.size} processes · {rs.length} roasters{matches&&matches.length?` · ${matches.length} bags scanned`:""}{awayLog.length?` · ${awayLog.length} tried elsewhere`:""}</div>
+
+    <div className="sec-lbl" style={{margin:"20px 0 8px"}}>Spend</div>
+    {priced.length===0?<div className="empty-grind">Add a price and bag size on a bean (Edit) to see cost per shot.</div>:
+      <div className="stat-row" style={{gridTemplateColumns:"repeat(3,1fr)"}}>
+        <div className="stat-box"><div className="stat-num" style={{fontSize:18}}>{money(spend)}</div><div className="stat-lbl">Spent</div></div>
+        <div className="stat-box"><div className="stat-num" style={{fontSize:18}}>{money(spend/grams*250)}</div><div className="stat-lbl">Per 250g</div></div>
+        <div className="stat-box"><div className="stat-num" style={{fontSize:18}}>{avgDose?money(avgDose):"—"}</div><div className="stat-lbl">Per Shot</div></div>
+      </div>}
+    {low.length>0&&<><div className="sec-lbl" style={{margin:"20px 0 8px"}}>Running Low</div>
+      <div className="rank-list">{low.map(x=><div key={x.b.id} className="rank-row" style={{cursor:"default"}}><span className="rank-lbl">{x.b.name}</span><span className="rank-n">{x.s.empty?"empty":x.s.rem+"g left"}</span></div>)}</div></>}
+    <div style={{height:40}}/>
+  </div>;
+}
+
+// ── DISCOVERY HELPERS (no AI needed) ───────────────────────────────────────
+const KNOWN_ORIGINS=["Ethiopia","Colombia","Kenya","Brazil","Guatemala","Costa Rica","Panama","Rwanda","Burundi","Honduras","Peru","El Salvador","Mexico","Indonesia","Yemen"];
+function tasteGaps(beans,awayLog){
+  const all=[...beans,...awayLog];
+  const have=s=>all.some(b=>(b.origin||"").toLowerCase().includes(s.toLowerCase()));
+  const originsMissing=KNOWN_ORIGINS.filter(o=>!have(o)).slice(0,8);
+  const procsMissing=["Washed","Natural","Honey","Anaerobic","Co-ferment"].filter(p=>!all.some(b=>(b.process||"").toLowerCase().includes(p.toLowerCase())));
+  const roastsMissing=ROAST_OPTS.filter(r=>!all.some(b=>(b.roast||"")===r));
+  // Combos you rate low (origin + process), from beans with a rating of 5.5 or lower
+  const lows={};
+  all.filter(b=>b.rating>0&&b.rating<=5.5).forEach(b=>{const k=[(b.origin||"").trim(),(b.process||"").trim()].filter(Boolean).join(" · ");if(k){(lows[k]=lows[k]||[]).push(b.rating);}});
+  const avoid=Object.entries(lows).map(([k,v])=>({k,avg:v.reduce((a,b)=>a+b,0)/v.length,n:v.length})).sort((a,b)=>a.avg-b.avg).slice(0,4);
+  return{originsMissing,procsMissing,roastsMissing,avoid};
+}
+function tasteContext(beans,awayLog,rs,gaps){
+  const line=b=>`${b.name} (${b.roaster||"?"}), ${b.origin||"?"}, ${b.process||"?"}, ${b.roast||"?"}, rated ${b.rating}/10${b.flavorProfile?", notes: "+b.flavorProfile:""}`;
+  const loved=beans.filter(b=>b.rating>=8).sort((a,b)=>b.rating-a.rating).map(line);
+  const mid=beans.filter(b=>b.rating>5.5&&b.rating<8).map(line);
+  const disliked=beans.filter(b=>b.rating>0&&b.rating<=5.5).map(line);
+  const away=awayLog.filter(a=>a.rating>0).map(a=>`${a.name} (${a.roaster||"?"}), ${a.origin||"?"}, ${a.process||"?"}, rated ${a.rating}/10${a.notes?", note: "+a.notes:""}`);
+  const rr=rs.filter(r=>r.rated>0).slice(0,6).map(r=>`${r.k}: ${r.avg.toFixed(1)} avg over ${r.rated} rated`);
+  const owned=beans.map(b=>`${b.name} (${b.roaster||"?"})`);
+  return `LOVED (8+):\n${loved.join("\n")||"none yet"}\n\nMIDDLE:\n${mid.join("\n")||"none"}\n\nDISLIKED (5.5 or lower, learn what to AVOID):\n${disliked.join("\n")||"none"}\n\nTRIED ELSEWHERE:\n${away.join("\n")||"none"}\n\nROASTER AVERAGES:\n${rr.join("\n")||"none"}\n\nGAPS (never tried): origins ${gaps.originsMissing.join(", ")||"none"}; processes ${gaps.procsMissing.join(", ")||"none"}.\nALREADY OWNS (do not suggest these): ${owned.join("; ")}`;
+}
+// Generic server-tool call (web search + web fetch). Handles pause_turn.
+async function callClaudeTools(system,user,tools,maxTokens){
+  const key=window._COFFEE_API_KEY;
+  if(!key)return{error:"No API key yet. Tap the gear icon to add your Anthropic API key.",code:"nokey"};
+  const messages=[{role:"user",content:user}];
+  try{
+    let d=null;
+    for(let turn=0;turn<5;turn++){
+      const res=await fetch("https://api.anthropic.com/v1/messages",{method:"POST",
+        headers:{"Content-Type":"application/json","x-api-key":key,"anthropic-version":"2023-06-01","anthropic-dangerous-direct-browser-access":"true"},
+        body:JSON.stringify({model:"claude-sonnet-4-6",max_tokens:maxTokens||3000,system,tools,messages})});
+      if(!res.ok){const t=await res.text();let msg=t;try{msg=JSON.parse(t).error.message;}catch(e){}return{error:String(msg).slice(0,240),code:"api",status:res.status};}
+      d=await res.json();
+      if(d.stop_reason==="pause_turn"){messages.push({role:"assistant",content:d.content});continue;}
+      break;
+    }
+    const blocks=(d&&d.content)||[];
+    const text=blocks.filter(b=>b.type==="text").map(b=>b.text||"").join("");
+    const toolErr=blocks.find(b=>(b.type==="web_search_tool_result"||b.type==="web_fetch_tool_result")&&b.content&&(b.content.type==="web_search_tool_result_error"||b.content.type==="web_fetch_tool_result_error"));
+    return{text,blocks,toolErr:toolErr?toolErr.content.error_code:null};
+  }catch(e){
+    const m=e.message||String(e);
+    if(m.includes("NetworkError")||m.includes("Failed to fetch")||m.includes("Load failed"))return{error:"Couldn't reach the Anthropic API. Check your connection.",code:"network"};
+    return{error:"Error: "+m,code:"exception"};
+  }
+}
+const SUGG_KEY="coffeeLog_suggestions_v1",SHOPURLS_KEY="coffeeLog_shopurls_v1";
+function loadSugg(){try{const r=localStorage.getItem(SUGG_KEY);return r?JSON.parse(r):null;}catch(e){return null;}}
+function loadShopUrls(){try{return localStorage.getItem(SHOPURLS_KEY)||"";}catch(e){return"";}}
+function cleanPick(p){
+  if(!p||typeof p!=="object")return null;
+  const s=k=>typeof p[k]==="string"?p[k].trim():"";
+  const url=s("url");
+  const tier=["safe","stretch","wild"].includes(s("tier").toLowerCase())?s("tier").toLowerCase():"stretch";
+  if(!s("name")&&!s("roaster"))return null;
+  const mp=Number(p.matchPct);
+  return{tier,name:s("name"),roaster:s("roaster"),url:/^https?:\/\//i.test(url)?url:"",price:s("price"),origin:s("origin"),process:s("process"),roast:s("roast"),notes:s("notes"),why:s("why"),matchPct:isNaN(mp)?null:Math.max(0,Math.min(100,Math.round(mp))),inStock:p.inStock===false?false:p.inStock===true?true:null};
+}
+
+const zonesFor=m=>m==="espresso"?ESPRESSO_ZONES:m==="aeropress"?AEROPRESS_ZONES:m==="moccamaster"?MOCCA_ZONES:POUROVER_ZONES;
 
 // ── AI ─────────────────────────────────────────────────────────────────────
 async function callClaude(system,user,json){
@@ -306,10 +750,10 @@ const SYSTEM=`You are an expert specialty coffee consultant. Equipment: La Marzo
 CRITICAL RULES: Shot SLOW >35s = NEVER finer grind. Shot FAST <22s = NEVER coarser. Sour+slow = channeling, fix puck prep first. Bitter+fast = over-extraction, coarser grind. AeroPress uses paper filter — grind accordingly. V60 uses metal filter — grind coarser than paper equivalent. AeroPress max 220g water. 3-5 bullets max. No fluff.`;
 
 // ── SMALL COMPONENTS (defined outside App so they never remount) ───────────
-function Field({label,value,onChange,multiline,placeholder}){
+function Field({label,value,onChange,multiline,placeholder,inputMode}){
   return multiline
     ?<div className="field"><label>{label}</label><textarea value={value} onChange={e=>onChange(e.target.value)} rows={2} placeholder={placeholder||""}/></div>
-    :<div className="field"><label>{label}</label><input value={value} onChange={e=>onChange(e.target.value)} placeholder={placeholder||""}/></div>;
+    :<div className="field"><label>{label}</label><input value={value} inputMode={inputMode} onChange={e=>onChange(e.target.value)} placeholder={placeholder||""}/></div>;
 }
 function Toggle({label,value,onChange}){
   return<div className="field"><label>{label}</label><button className={"toggle-btn"+(value?" on":"")} onClick={()=>onChange(!value)}>{value?"Yes":"No"}</button></div>;
@@ -577,14 +1021,14 @@ Return: {"originStory":"2-3 sentences","processExplained":"2-3 sentences","roast
 }
 
 // ── EDIT FORM — defined OUTSIDE App so it never remounts ──────────────────
-function EditForm({draft,setDraft,method,updDraftM,adding,saveNew,saveEdit,setAdding,setShowList,setEditing}){
+function EditForm({draft,setDraft,method,updDraftM,adding,saveNew,saveEdit,setAdding,setShowList,setEditing,rGroups}){
   if(!draft)return null;
   const m=draft.methods?.[method]||DEF[method];
   const u=f=>v=>updDraftM(f,v);
   return<div className="tc" style={{paddingTop:16}}>
     <div className="sec-lbl" style={{marginBottom:10}}>Bean Info</div>
     <div className="fg" style={{marginBottom:14}}>
-      <Field label="Roaster" value={draft.roaster} onChange={v=>setDraft(d=>({...d,roaster:v}))}/>
+      <RoasterField value={draft.roaster} onChange={v=>setDraft(d=>({...d,roaster:v}))} groups={rGroups||[]}/>
       <Field label="Bean Name" value={draft.name} onChange={v=>setDraft(d=>({...d,name:v}))}/>
       <Field label="Origin" value={draft.origin} onChange={v=>setDraft(d=>({...d,origin:v}))}/>
       <div className="field"><label>Process</label><select className="sel-input" value={draft.process} onChange={e=>setDraft(d=>({...d,process:e.target.value}))}><option value="">Select...</option>{PROCESS_OPTS.map(o=><option key={o} value={o}>{o}</option>)}</select></div>
@@ -593,6 +1037,10 @@ function EditForm({draft,setDraft,method,updDraftM,adding,saveNew,saveEdit,setAd
       <Field label="Altitude" value={draft.altitude||""} onChange={v=>setDraft(d=>({...d,altitude:v}))} placeholder="e.g. 1800m"/>
       <div className="field full"><Field label="Varietal" value={draft.varietal||""} onChange={v=>setDraft(d=>({...d,varietal:v}))} placeholder="e.g. Bourbon, Gesha"/></div>
       <div className="field full"><Field label="Flavor Profile" value={draft.flavorProfile||""} onChange={v=>setDraft(d=>({...d,flavorProfile:v}))} placeholder="e.g. Blueberry, chocolate"/></div>
+      <div className="field full"><div className="sec-lbl" style={{marginTop:6,marginBottom:0}}>Purchase & Stock</div></div>
+      <Field label="Price Paid ($)" value={draft.price||""} inputMode="decimal" onChange={v=>setDraft(d=>({...d,price:v}))} placeholder="incl. shipping"/>
+      <Field label="Bag Size (g)" value={draft.bagGrams||""} inputMode="decimal" onChange={v=>setDraft(d=>({...d,bagGrams:v}))} placeholder="e.g. 250"/>
+      <Field label="Remaining (g)" value={draft.remainingG||""} inputMode="decimal" onChange={v=>setDraft(d=>({...d,remainingG:v}))} placeholder="blank = full bag"/>
       <div className="field full">
         <label>Bag Image</label>
         <input value={draft.imageUrl||""} onChange={e=>setDraft(d=>({...d,imageUrl:e.target.value,imageBase64:""}))} placeholder="https://roaster.com/image.jpg"/>
@@ -726,6 +1174,22 @@ function App(){
   const[matchPhoto,setMatchPhoto]=useState(null);
   const[matchSaved,setMatchSaved]=useState(false);
   const[matchHistory,setMatchHistory]=useState(loadMatchHistory);
+  const[tastes,setTastes]=useState([]);
+  const[compassRes,setCompassRes]=useState(null);
+  const[showNote,setShowNote]=useState(false);
+  const[showZones,setShowZones]=useState(false);
+  const[redial,setRedial]=useState(false);
+  const[cardDlg,setCardDlg]=useState(null);
+  const[rosterNagDismissed,setRosterNagDismissed]=useState(false);
+  const[cleanupDlg,setCleanupDlg]=useState(null);
+  const[renameDlg,setRenameDlg]=useState(null);
+  const[sugg,setSugg]=useState(loadSugg);
+  const[suggLoading,setSuggLoading]=useState(false);
+  const[suggError,setSuggError]=useState("");
+  const[budget,setBudget]=useState("any");
+  const[shopUrls,setShopUrls]=useState(loadShopUrls);
+  const rGroups=roasterGroups([...beans.map(b=>b.roaster),...awayLog.map(a=>a.roaster)]);
+  const rStats=roasterStats(beans,awayLog);
 
   // Use the smaller viewport dimension, not just width, so a phone rotated to landscape
   // (wide but still short) doesn't get mistaken for a desktop/tablet layout.
@@ -744,12 +1208,12 @@ function App(){
 
   const upd=fn=>setBeans(prev=>{const next=fn(prev);saveBeans(next);return next;});
 
-  const selectBean=id=>{setSelId(id);setShowList(false);setEditing(false);setAdding(false);setTab("shot");setDiagInput("");setUrlImport(null);setCompass(null);setShotTime("");setShotYield("");setActiveRecipeIdx(null);setRecipeFeedback("");setDiagFollowup("");setLastDiagCtx("");setTimeout(()=>{const d=document.querySelector(".detail");if(d)d.scrollTop=0;},50);};
+  const selectBean=id=>{setSelId(id);setShowList(false);setEditing(false);setAdding(false);setTab("shot");setDiagInput("");setUrlImport(null);setCompass(null);setTastes([]);setCompassRes(null);setShowNote(false);setRedial(false);setShotTime("");setShotYield("");setActiveRecipeIdx(null);setRecipeFeedback("");setDiagFollowup("");setLastDiagCtx("");setTimeout(()=>{const d=document.querySelector(".detail");if(d)d.scrollTop=0;},50);};
   const startAdd=()=>{setDraft({roaster:"",name:"",origin:"",process:"",roast:"",altitude:"",varietal:"",flavorProfile:"",roastDate:"",imageUrl:"",imageBase64:"",rating:0,inStock:true,currentlyBrewing:false,methods:{espresso:{...DEF.espresso},aeropress:{...DEF.aeropress},pourover:{...DEF.pourover},moccamaster:{...DEF.moccamaster}}});setAdding(true);setEditing(false);setShowList(false);setUrlImport(null);setUrlInput("");setPhotoImport(null);setCapturedPhoto(null);};
-  const saveNew=()=>{if(!draft.name)return;const id=Date.now();upd(bs=>[...bs,{...draft,id,grindLogs:{espresso:[],aeropress:[],pourover:[],moccamaster:[]},savedRecipes:{aeropress:[],pourover:[],moccamaster:[]}}]);setSelId(id);setAdding(false);setShowList(false);setTab("shot");};
+  const saveNew=()=>{if(!draft.name)return;const id=Date.now();upd(bs=>[...bs,{...draft,roaster:snapRoaster(draft.roaster,rGroups),id,grindLogs:{espresso:[],aeropress:[],pourover:[],moccamaster:[]},savedRecipes:{aeropress:[],pourover:[],moccamaster:[]},shots:{espresso:[],aeropress:[],pourover:[],moccamaster:[]},dialed:{espresso:null,aeropress:null,pourover:null,moccamaster:null}}]);setSelId(id);setAdding(false);setShowList(false);setTab("shot");};
   const delBean=id=>{upd(bs=>bs.filter(b=>b.id!==id));setSelId(null);setShowList(true);};
   const startEdit=()=>{setDraft({...cur,methods:JSON.parse(JSON.stringify(cur.methods))});setEditing(true);};
-  const saveEdit=()=>{upd(bs=>bs.map(b=>b.id===selId?{...b,...draft}:b));setEditing(false);};
+  const saveEdit=()=>{const g=roasterGroups([...beans.filter(b=>b.id!==selId).map(b=>b.roaster),...awayLog.map(a=>a.roaster)]);upd(bs=>bs.map(b=>b.id===selId?{...b,...draft,roaster:snapRoaster(draft.roaster,g)}:b));setEditing(false);};
   const updDraftM=(f,v)=>setDraft(d=>({...d,methods:{...d.methods,[method]:{...d.methods[method],[f]:v}}}));
   const updM=(f,v)=>{let val=v;if(f==="water"&&method==="aeropress"){const n=parseInt(val);if(!isNaN(n)&&n>220)val="220";}upd(bs=>bs.map(b=>b.id===selId?{...b,methods:{...b.methods,[method]:{...b.methods[method],[f]:val}}}:b));};
   const saveFreezer=()=>{
@@ -802,7 +1266,7 @@ function App(){
     try{
       const parsed=JSON.parse(raw);
       if(parsed&&parsed.type==="coffeeLogExport"&&Array.isArray(parsed.beans)){
-        const incoming=parsed.beans.map(b=>migrate({...b,id:Date.now()+Math.random()}));
+        const incoming=parsed.beans.map(b=>migrate({...b,roaster:snapRoaster(b.roaster,rGroups),id:Date.now()+Math.random()}));
         if(incoming.length===0&&!(parsed.awayLog&&parsed.awayLog.length)){setImportStatus("No beans found in file.");return;}
         upd(bs=>[...bs,...incoming.filter(nb=>!bs.some(b=>b.name===nb.name&&b.roaster===nb.roaster))]);
         if(Array.isArray(parsed.awayLog)&&parsed.awayLog.length){
@@ -849,7 +1313,7 @@ function App(){
   };
 
   const applyBeanData=f=>{
-    setDraft(d=>({...d,...f,name:f.name?titleCase(f.name):d.name,roaster:f.roaster?titleCase(f.roaster):d.roaster}));
+    setDraft(d=>({...d,...f,name:f.name?titleCase(f.name):d.name,roaster:f.roaster?snapRoaster(f.roaster,rGroups):d.roaster}));
     setUrlImport({...f,_count:Object.keys(f).length});
   };
   const importUrl=async()=>{
@@ -884,7 +1348,7 @@ function App(){
         `Read this coffee bag label/photo and extract as much as you can identify. Leave a field as empty string "" if not visible or not stated on the bag. Return JSON exactly in this shape:\n{"roaster":"","name":"","origin":"","process":"","roast":"","altitude":"","varietal":"","flavorProfile":"","roastDate":""}\nFor roast, use one of: Light, Light-Medium, Medium, Medium-Dark, Dark — infer from any roast description if not explicit. For roastDate, use YYYY-MM-DD format if a date is visible, else leave empty.`,
         dataUrl,true
       );
-      if(r){setDraft(d=>({...d,...r,name:titleCase(r.name),roaster:titleCase(r.roaster),imageBase64:dataUrl,imageUrl:""}));setPhotoImport(r);}
+      if(r){setDraft(d=>({...d,...r,name:titleCase(r.name),roaster:snapRoaster(r.roaster,rGroups),imageBase64:dataUrl,imageUrl:""}));setPhotoImport(r);}
       else setPhotoImport({error:"Couldn't read the label clearly. Try a closer, well-lit photo, or fill in manually."});
       setPhotoLoading(false);
     };
@@ -912,26 +1376,30 @@ function App(){
   };
 
   const runDiagnosis=async(followup)=>{
-    if(!followup&&!diagInput.trim()&&!compass)return;
+    if(!followup&&!diagInput.trim()&&!compass&&!tastes.length)return;
     setAiLoading(true);if(!followup)setAiResult("");
     const tStr=shotTime?shotTime+"s":(md.time?md.time+"s (logged)":"unknown");
     const yStr=shotYield?shotYield+"g":(md.yield?md.yield+"g (logged)":"unknown");
     const slow=shotTime&&parseInt(shotTime)>35?" SHOT WAS SLOW — do NOT recommend finer grind.":"";
     const fast=shotTime&&parseInt(shotTime)<22?" SHOT WAS FAST — do NOT recommend coarser grind.":"";
     const cCtx=compass?` Compass: ${compass.label} — ${compass.desc}.`:"";
-    const ctx=method==="espresso"
+    const ctx0=method==="espresso"
       ?`Bean:${cur.name}(${cur.roaster}),${cur.origin},${cur.process},${cur.roast}. Setup:${md.dose}g/${md.temp}°F/grind ${grindLabel(lg?.position)}/pre-brew ${md.preBrew}. THIS SHOT:time=${tStr},yield=${yStr}.${slow}${fast}${cCtx}`
       :method==="aeropress"
       ?`Bean:${cur.name},${cur.process},${cur.roast}. AeroPress:${md.dose}g/${md.water}g/${md.temp}°F/steep ${md.steepTime}s/press ${md.pressTime}s.Inverted:${md.inverted}.Bloom:${md.bloom} ${md.bloomTime}s.Grind:${grindLabel(lg?.position)}.`
       :method==="moccamaster"
       ?`Bean:${cur.name},${cur.process},${cur.roast}. Moccamaster KBT batch drip:${md.dose}g/${md.water}ml (ratio ${ratioStr(md.dose,md.water)}),brew time ${md.totalTime}.Grind:${grindLabel(lg?.position)}.`
       :`Bean:${cur.name},${cur.process},${cur.roast}. Pour Over V60:${md.dose}g/${md.water}g/${md.temp}°F/bloom ${md.bloomAmount}g ${md.bloomTime}s/total ${md.totalTime}.Grind:${grindLabel(lg?.position)}.`;
+    const tCtx=tastes.length?` Cup tastes: ${tastes.join(", ")}.`:"";
+    const hCtx=(cur.shots?.[method]||[]).slice(-4).map(s=>`[${s.date} grind ${s.grind?grindLabel(s.grind):"?"} dose ${s.dose||"?"} time ${s.time||"?"} zone ${s.zone} move ${s.move||"-"}]`).join(" ");
+    const thawCtx=cur.thawedOn?` Beans were frozen, thawed ${cur.thawedOn}.`:isFrozen(cur)?" Beans are frozen.":"";
+    const ctx=ctx0+tCtx+thawCtx+(hCtx?` Recent dial-in shots (oldest first): ${hCtx}. Give ONE change only, a small step, and never contradict the slow/fast rules.`:" Give ONE change only, a small step.");
     if(followup){
       const r=await callClaude(SYSTEM,`Previous setup and diagnosis:\n${lastDiagCtx}\nPrevious advice:\n${aiResult}\n\nThe person made this adjustment and pulled again: ${followup}\nCurrent setup:${ctx}\n\nDid the adjustment help? What should they try next?`);
       setAiResult(r);setAiLoading(false);setDiagFollowup("");
       return;
     }
-    const msg=diagInput.trim()?`Setup:${ctx}\nTasting:${diagInput}\nAdjustments?`:`Setup:${ctx}\nCompass:${compass?.label}.Adjustments?`;
+    const msg=diagInput.trim()?`Setup:${ctx}\nTasting:${diagInput}\nAdjustments?`:`Setup:${ctx}\nCompass:${compass?.label||"inferred from the tastes above"}.Adjustments?`;
     setLastDiagCtx(ctx);
     const r=await callClaude(SYSTEM,msg);setAiResult(r);setAiLoading(false);
   };
@@ -948,6 +1416,83 @@ function App(){
       :"Generate pour over for Hario V60 with METAL filter (grind coarser than paper). Include:dose(g),water(g),temp(°F),bloom amount(g) and time(s),pour sequence with timing,total time,grind on 0-12 scale. Brief rationale.";
     const r=await callClaude(SYSTEM,`Bean:${bInfo}${recipeCtx?`\nContext:${recipeCtx}`:""}${prev?`\nPrevious recipe:\n${prev}`:""}${feedback?`\nFeedback:${feedback}\nAdjust accordingly.`:""}\n\n${inst}`);
     setAiResult(r);setAiLoading(false);
+  };
+
+  // ── Cost & stock ──
+  const useDose=()=>{
+    const d=num(md.dose);if(!d||!cur)return;
+    const si=stockInfo(cur,md.dose);if(!si)return;
+    const nr=Math.max(0,Math.round((si.rem-d)*10)/10);
+    upd(bs=>bs.map(b=>b.id===selId?{...b,remainingG:String(nr),inStock:nr<=0?false:b.inStock}:b));
+  };
+  // ── Compass: log the shot, get ONE next move ──
+  const getMove=()=>{
+    if(!cur)return;
+    const zones=zonesFor(method);
+    const zone=compass||inferZone(zones,tastes);
+    if(!zone)return;
+    const t=method==="espresso"?(parseFloat(shotTime||md.time)||null):null;
+    const shots=cur.shots?.[method]||[];
+    const mv=nextMove({method,zone,tastes,time:t,shots,bean:cur,zones});
+    const entry={id:Date.now(),date:todayISO(),grind:lg?lg.position:null,dose:md.dose||"",yield:method==="espresso"?(md.yield||""):"",water:md.water||"",time:method==="espresso"?String(shotTime||md.time||""):(md.totalTime||""),temp:md.temp||"",zone:zone.id,tastes:[...tastes],note:diagInput.trim(),move:fmtSteps(mv.steps)};
+    upd(bs=>bs.map(b=>b.id===selId?{...b,shots:{...(b.shots||{}),[method]:[...(b.shots?.[method]||[]),entry]}}:b));
+    setCompassRes({mv,zone,newGrind:lg&&mv.steps?shiftGrind(lg.position,mv.steps):null});
+  };
+  const delShot=id=>upd(bs=>bs.map(b=>b.id===selId?{...b,shots:{...(b.shots||{}),[method]:(b.shots?.[method]||[]).filter(s=>s.id!==id)}}:b));
+  const applyGrindMove=pos=>{
+    upd(bs=>bs.map(b=>b.id===selId?{...b,grindLogs:{...b.grindLogs,[method]:[...(b.grindLogs[method]||[]),{position:pos,note:"From compass",id:Date.now(),date:new Date().toLocaleDateString()}]}}:b));
+    setCompassRes(r=>r?{...r,newGrind:null,applied:true}:r);setTastes([]);setCompass(null);
+  };
+  const lockIn=()=>{
+    const d={date:todayISO(),grind:lg?grindLabel(lg.position):"",dose:md.dose||"",yield:md.yield||"",water:md.water||"",time:method==="espresso"?(md.time||""):(md.totalTime||""),temp:md.temp||"",shots:(cur.shots?.[method]||[]).length};
+    upd(bs=>bs.map(b=>b.id===selId?{...b,dialed:{...(b.dialed||{}),[method]:d}}:b));
+    setRedial(false);setCompassRes(null);setCompass(null);setTastes([]);
+  };
+  // ── Roaster tools ──
+  const openCleanup=()=>setCleanupDlg(Object.fromEntries(rGroups.filter(g=>g.mixed).map(g=>[g.key,g.name])));
+  const applyCleanup=()=>{
+    const map=cleanupDlg;
+    upd(bs=>bs.map(b=>{const k=rKey(b.roaster);return map[k]?{...b,roaster:map[k]}:b;}));
+    setAwayLog(a=>a.map(x=>{const k=rKey(x.roaster);return map[k]?{...x,roaster:map[k]}:x;}));
+    setCleanupDlg(null);
+  };
+  const applyRename=()=>{
+    const to=(renameDlg.to||"").trim();if(!to)return;
+    const key=renameDlg.key;
+    upd(bs=>bs.map(b=>rKey(b.roaster)===key?{...b,roaster:to}:b));
+    setAwayLog(a=>a.map(x=>rKey(x.roaster)===key?{...x,roaster:to}:x));
+    setRenameDlg(null);
+  };
+  // ── Find real beans (web search + fetch) ──
+  const runFind=async()=>{
+    setSuggLoading(true);setSuggError("");
+    if(!beans.some(b=>b.rating>0)&&!awayLog.some(a=>a.rating>0)){setSuggError("Rate a few beans first so there's a taste profile to work from.");setSuggLoading(false);return;}
+    const gaps=tasteGaps(beans,awayLog);
+    const ctx=tasteContext(beans,awayLog,rStats,gaps);
+    const urls=shopUrls.split(/\s+/).filter(u=>/^https?:\/\//i.test(u)).slice(0,4);
+    const bud=budget==="any"?"No firm budget, but state the price.":"Keep the price at or under $"+budget+" per 250g (about $"+(budget*4)+" per kg).";
+    const system="You are a specialty coffee buyer. You find REAL coffees that are for sale online right now and match one person's taste. Only recommend a coffee if you saw its product page or a search result for it. Never invent a coffee, a price or a URL. Answer with one JSON object only.";
+    const prompt=ctx+"\n\nTASK: Find 3 real coffees this person should buy next: one SAFE pick (very likely to love), one STRETCH (adjacent to what they like and fills a gap), one WILD card (different but plausible). "+bud+" Prefer roasters that ship in the US. Skip anything on the already-owns list and avoid the patterns they rate low."+(urls.length?"\nCheck these roaster shop pages first:\n"+urls.join("\n"):"")+"\n\nReturn ONLY this JSON:\n{\"profile\":\"2 sentence summary of their taste\",\"picks\":[{\"tier\":\"safe\",\"name\":\"\",\"roaster\":\"\",\"url\":\"product page URL\",\"price\":\"for example $22 for 250g\",\"origin\":\"\",\"process\":\"\",\"roast\":\"\",\"notes\":\"tasting notes\",\"why\":\"1 to 2 sentences tied to their own ratings\",\"matchPct\":0,\"inStock\":true}]}\nUse \"\" for anything you could not verify. inStock is true only if the page shows it available.";
+    const both=[{type:"web_search_20250305",name:"web_search",max_uses:5},{type:"web_fetch_20250910",name:"web_fetch",max_uses:4,max_content_tokens:20000}];
+    let r=await callClaudeTools(system,prompt,both,3500);
+    if(r.error&&r.code==="api"&&/search/i.test(r.error)){
+      if(urls.length)r=await callClaudeTools(system,prompt,[both[1]],3500);
+      else{setSuggError("Web search isn't available on your Anthropic account ("+r.error+"). Add one to four roaster shop links below and I'll browse those instead.");setSuggLoading(false);return;}
+    }
+    if(r.error){setSuggError(r.error);setSuggLoading(false);return;}
+    const data=extractJsonObject(r.text);
+    const picks=((data&&data.picks)||[]).map(cleanPick).filter(Boolean).slice(0,3);
+    if(!picks.length){setSuggError((r.toolErr?"The search tool reported a problem ("+r.toolErr+"). ":"")+"I couldn't verify any beans this time. Try again, or add roaster shop links below.");setSuggLoading(false);return;}
+    const out={date:todayISO(),profile:(data&&typeof data.profile==="string")?data.profile:"",picks};
+    setSugg(out);try{localStorage.setItem(SUGG_KEY,JSON.stringify(out));}catch(e){}
+    setSuggLoading(false);
+  };
+  const addSuggestion=p=>{
+    startAdd();
+    const f=cleanBeanFields({roaster:p.roaster,name:p.name,origin:p.origin,process:p.process,roast:p.roast,flavorProfile:p.notes});
+    const pm=p.price.match(/\$\s?(\d+(?:\.\d+)?)/),gm=p.price.match(/(\d+)\s?g\b/i)||p.price.match(/(\d+)\s?(?:oz)\b/i);
+    setDraft(d=>({...d,...f,name:f.name?titleCase(f.name):d.name,roaster:f.roaster?snapRoaster(f.roaster,rGroups):d.roaster,price:pm?pm[1]:"",bagGrams:gm&&/g\b/i.test(gm[0])?gm[1]:""}));
+    setScreen("beans");
   };
 
   const launchTimer=m=>{
@@ -997,7 +1542,7 @@ function App(){
   const saveApiKey=()=>{window._COFFEE_API_KEY=apiKeyInput.trim();try{localStorage.setItem("coffeeLog_apikey",apiKeyInput.trim());}catch(e){}setShowApiModal(false);};
 
   // ── TASTING LOG (away) ──
-  const addAway=()=>{if(!awayDraft.name.trim())return;setAwayLog(a=>[{...awayDraft,id:Date.now(),date:awayDraft.date||new Date().toLocaleDateString()},...a]);setAwayDraft({name:"",roaster:"",place:"",method:"",origin:"",process:"",roast:"",flavorProfile:"",notes:"",rating:0,date:""});setAddingAway(false);setAwayPhotoImport(null);setAwayCapturedPhoto(null);};
+  const addAway=()=>{if(!awayDraft.name.trim())return;setAwayLog(a=>[{...awayDraft,roaster:snapRoaster(awayDraft.roaster,rGroups),id:Date.now(),date:awayDraft.date||new Date().toLocaleDateString()},...a]);setAwayDraft({name:"",roaster:"",place:"",method:"",origin:"",process:"",roast:"",flavorProfile:"",notes:"",rating:0,date:""});setAddingAway(false);setAwayPhotoImport(null);setAwayCapturedPhoto(null);};
   const delAway=id=>setAwayLog(a=>a.filter(x=>x.id!==id));
 
   // ── COMPARE ──
@@ -1357,6 +1902,69 @@ Give me: dose, ${method==="espresso"?"yield, time, temp, pre-brew":(method==="mo
       .kiosk-card-meta{font-size:12px;color:var(--text3);margin-top:6px;}
       .kiosk-card-flavor{font-size:13px;color:var(--text2);margin-top:6px;font-style:italic;}
 
+      /* ROASTER FIELD */
+      .rf-sugg{display:flex;flex-wrap:wrap;gap:6px;margin-top:6px;}
+      .rf-chip{font-family:'DM Mono',monospace;font-size:12px;padding:5px 9px;background:var(--bg3);border:1px solid var(--border);color:var(--text2);cursor:pointer;display:inline-flex;gap:6px;align-items:center;-webkit-tap-highlight-color:transparent;}
+      .rf-chip:active{border-color:var(--gold);}
+      .rf-n{font-size:10px;color:var(--muted);}
+      .rf-note{font-size:11px;color:var(--muted);margin-top:6px;line-height:1.5;}
+      .rf-link{background:none;border:none;color:var(--gold);font-family:'DM Mono',monospace;font-size:11px;text-decoration:underline;cursor:pointer;padding:0;}
+      .btn-link{background:none;border:none;color:var(--gold);font-family:'DM Mono',monospace;font-size:12px;text-decoration:underline;cursor:pointer;padding:8px 0;-webkit-tap-highlight-color:transparent;}
+      /* COMPASS V2 */
+      .cv2{margin:2px 0 4px;}
+      .cv2-svg{width:100%;height:auto;display:block;touch-action:manipulation;-webkit-tap-highlight-color:transparent;}
+      .cv2-hint{font-size:12px;color:var(--text3);min-height:34px;line-height:1.5;margin-bottom:2px;}
+      .tchips{display:flex;flex-wrap:wrap;gap:7px;}
+      .tchip{font-family:'DM Mono',monospace;font-size:13px;padding:8px 13px;background:var(--bg3);border:1px solid var(--border);color:var(--text3);cursor:pointer;border-radius:20px;-webkit-tap-highlight-color:transparent;}
+      .tchip.on{background:#2a1e0a;border-color:var(--gold);color:var(--gold);}
+      .tchip.good.on{background:#16241a;border-color:var(--green);color:var(--green);}
+      .diag-hint{font-size:11px;color:var(--muted);line-height:1.5;align-self:end;padding-bottom:6px;}
+      .move-card{background:#1a1610;border:1px solid var(--border);border-left:3px solid var(--gold);padding:14px;margin:6px 0 14px;}
+      .move-eyebrow{font-size:9px;letter-spacing:2.5px;text-transform:uppercase;color:var(--muted);margin-bottom:4px;}
+      .move-title{font-family:'Playfair Display',serif;font-size:20px;margin-bottom:6px;}
+      .move-body{font-size:15px;color:var(--text);line-height:1.55;margin-bottom:8px;}
+      .move-grind{font-size:18px;color:var(--gold);letter-spacing:1px;margin-bottom:8px;}
+      .move-why{font-size:12px;color:var(--text3);line-height:1.55;margin-bottom:8px;}
+      .move-trend{font-size:12px;padding:7px 9px;margin-bottom:8px;line-height:1.5;border:1px solid var(--border);}
+      .move-trend.good{color:var(--green);border-color:#3a5a28;background:#141e12;}
+      .move-trend.bad{color:var(--red);border-color:#5a2a2a;background:#201212;}
+      .move-flag{font-size:12px;color:var(--gold);line-height:1.5;margin-bottom:6px;padding-left:10px;border-left:2px solid var(--gold);}
+      .dialed-card{background:#141e12;border:1px solid #3a5a28;padding:16px;margin-bottom:14px;}
+      .dialed-badge{font-family:'Playfair Display',serif;font-size:22px;color:var(--green);}
+      .dialed-sub{font-size:12px;color:var(--muted);margin:2px 0 12px;}
+      .zdot{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:8px;}
+      /* STOCK */
+      .stock-bar{height:6px;background:var(--border);margin:6px 0 8px;overflow:hidden;}
+      .stock-bar span{display:block;height:100%;}
+      /* STATS */
+      .bars{display:flex;gap:8px;align-items:flex-end;height:104px;}
+      .bar-col{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:flex-end;gap:3px;}
+      .bar{width:100%;background:var(--gold);opacity:.85;}
+      .bar-n{font-size:11px;color:var(--text2);min-height:14px;}
+      .bar-l{font-size:10px;color:var(--muted);}
+      .hbar-row{display:flex;align-items:center;gap:10px;margin-bottom:6px;}
+      .hbar-l{width:92px;font-size:12px;color:var(--text3);}
+      .hbar-track{flex:1;height:8px;background:var(--border);}
+      .hbar-fill{display:block;height:100%;background:var(--blue);}
+      .hbar-n{width:26px;text-align:right;font-size:12px;color:var(--text2);}
+      /* SUGGESTIONS */
+      .gap-pill{display:inline-block;font-size:11px;padding:4px 9px;border:1px solid var(--border);color:var(--text3);margin:0 6px 6px 0;}
+      .gap-pill.avoid{border-color:#5a2a2a;color:var(--red);}
+      .bud-row{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px;}
+      .bud{font-family:'DM Mono',monospace;font-size:12px;padding:7px 11px;background:var(--bg3);border:1px solid var(--border);color:var(--text3);cursor:pointer;}
+      .bud.on{border-color:var(--gold);color:var(--gold);background:#2a1e0a;}
+      .pick{background:var(--bg3);border:1px solid var(--border);padding:14px;margin-bottom:10px;}
+      .pick-top{display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;}
+      .pick-tier{font-size:9px;letter-spacing:2px;text-transform:uppercase;padding:3px 8px;border:1px solid var(--border);}
+      .pick-tier.safe{color:var(--green);border-color:#3a5a28;}
+      .pick-tier.stretch{color:var(--gold);border-color:var(--gold);}
+      .pick-tier.wild{color:var(--purple);border-color:#4a3a6a;}
+      .pick-match{font-size:20px;font-weight:700;color:var(--gold);}
+      .pick-name{font-family:'Playfair Display',serif;font-size:19px;color:var(--text);margin-bottom:2px;}
+      .pick-roaster{font-size:12px;color:var(--gold);margin-bottom:4px;line-height:1.5;}
+      .pick-meta{font-size:12px;color:var(--text3);margin-bottom:6px;}
+      .pick-notes{font-size:12px;color:var(--text2);font-style:italic;margin-bottom:6px;}
+      .pick-why{font-size:13px;color:var(--text2);line-height:1.55;}
       @media(min-width:680px) and (min-height:680px){
         .back{display:none!important;}
         .bc-arrow{display:none!important;}
@@ -1404,7 +2012,7 @@ Give me: dose, ${method==="espresso"?"yield, time, temp, pre-brew":(method==="mo
     </div>
 
     {!kioskMode&&<div className="screen-nav">
-      {[["beans","Beans"],["compare","Compare"],["discovery","Discovery"],["away","Tasting Log"]].map(([id,label])=>
+      {[["beans","Beans"],["compare","Compare"],["discovery","Discovery"],["stats","Stats"],["away","Tasting Log"]].map(([id,label])=>
         <button key={id} className={"screen-tab"+(screen===id?" active":"")} onClick={()=>{setScreen(id);if(id==="beans"){setShowList(true);}}}>{label}</button>
       )}
     </div>}
@@ -1415,6 +2023,12 @@ Give me: dose, ${method==="espresso"?"yield, time, temp, pre-brew":(method==="mo
       <div style={{fontSize:13,color:"var(--muted)",marginBottom:10}}>{lastBackup?("Last file backup: "+Math.floor((Date.now()-lastBackup)/86400000)+" days ago."):"You have never saved a backup file."} Your data only lives in this browser, and iPhone can clear it without warning.</div>
       <button className="btn p sm" onClick={backupAll}>Save backup to Files</button>
       <button className="btn sm" style={{marginLeft:8}} onClick={()=>setNagDismissed(true)}>Later</button>
+    </div>}
+    {screen==="beans"&&!kioskMode&&!rosterNagDismissed&&rGroups.some(g=>g.mixed)&&<div style={{margin:"10px 15px 0",padding:"12px 14px",border:"1px solid var(--border)",borderRadius:10,background:"var(--bg2)"}}>
+      <div style={{fontWeight:700,marginBottom:4}}>Some roaster names are spelled differently</div>
+      <div style={{fontSize:13,color:"var(--muted)",marginBottom:10}}>{rGroups.filter(g=>g.mixed).map(g=>g.variants.join(" / ")).slice(0,3).join(", ")}. Merging them keeps roaster ratings accurate.</div>
+      <button className="btn p sm" onClick={openCleanup}>Review</button>
+      <button className="btn sm" style={{marginLeft:8}} onClick={()=>setRosterNagDismissed(true)}>Later</button>
     </div>}
     {screen==="beans"&&beans.length===0&&autoBackup&&<div style={{margin:"12px 15px",padding:"12px 14px",border:"1px solid var(--accent)",borderRadius:10,background:"var(--bg2)"}}>
       <div style={{fontWeight:700,marginBottom:4}}>Your bean list is empty</div>
@@ -1450,6 +2064,7 @@ Give me: dose, ${method==="espresso"?"yield, time, temp, pre-brew":(method==="mo
                   {b.currentlyBrewing&&<span className="bc-badge brewing">Brewing Now</span>}
                   {out&&<span className="bc-badge out">Out of Stock</span>}
                   {!out&&freshness(b)&&freshness(b).label!=="Peak"&&<span className="bc-badge" style={{color:freshness(b).color,borderColor:freshness(b).color,background:"transparent"}}>{freshness(b).label}</span>}
+                  {!out&&(()=>{const si=stockInfo(b,b.methods?.espresso?.dose);return si&&(si.low||si.empty)?<span className="bc-badge" style={{color:"var(--gold)",borderColor:"var(--gold)",background:"transparent"}}>{si.empty?"Empty":"Low · "+si.rem+"g"}</span>:null;})()}
                 </div>
                 {b.rating>0&&<div className="bc-rating">{"★".repeat(Math.round(b.rating/2))} {b.rating}/10</div>}
               </div>
@@ -1492,7 +2107,7 @@ Give me: dose, ${method==="espresso"?"yield, time, temp, pre-brew":(method==="mo
           </div>}
           <div className="div"/>
         </div>
-        <EditForm draft={draft} setDraft={setDraft} method={method} updDraftM={updDraftM} adding={adding} saveNew={saveNew} saveEdit={saveEdit} setAdding={setAdding} setShowList={setShowList} setEditing={setEditing}/>
+        <EditForm draft={draft} setDraft={setDraft} method={method} updDraftM={updDraftM} adding={adding} saveNew={saveNew} saveEdit={saveEdit} setAdding={setAdding} setShowList={setShowList} setEditing={setEditing} rGroups={rGroups}/>
       </div>}
 
       {/* EDIT BEAN */}
@@ -1503,7 +2118,7 @@ Give me: dose, ${method==="espresso"?"yield, time, temp, pre-brew":(method==="mo
             {METHODS.map(m=><button key={m} className={"method-btn"+(method===m?" active":"")} onClick={()=>setMethod(m)}>{METHOD_LABELS[m]}</button>)}
           </div>
         </div>
-        <EditForm draft={draft} setDraft={setDraft} method={method} updDraftM={updDraftM} adding={adding} saveNew={saveNew} saveEdit={saveEdit} setAdding={setAdding} setShowList={setShowList} setEditing={setEditing}/>
+        <EditForm draft={draft} setDraft={setDraft} method={method} updDraftM={updDraftM} adding={adding} saveNew={saveNew} saveEdit={saveEdit} setAdding={setAdding} setShowList={setShowList} setEditing={setEditing} rGroups={rGroups}/>
       </div>}
 
       {/* BEAN DETAIL */}
@@ -1526,6 +2141,7 @@ Give me: dose, ${method==="espresso"?"yield, time, temp, pre-brew":(method==="mo
                 <button className="btn sm" style={{borderColor:"#3a5a7a",color:"var(--blue)",background:isFrozen(cur)?"#1a2838":"transparent"}} onClick={()=>setFreezerDlg({frozenOn:cur.frozenOn||todayISO(),thawedOn:cur.thawedOn||""})}>
                   {isFrozen(cur)?"❄ Frozen":cur.frozenOn?"❄ Freezer dates":"Mark Frozen"}
                 </button>
+                <button className="btn sm" style={{borderColor:"var(--gold)",color:"var(--gold)"}} onClick={()=>setCardDlg(method)}>Share Card</button>
               </div>
               <div className="pills">
                 {cur.origin&&<span className="pill">{cur.origin}</span>}
@@ -1538,7 +2154,7 @@ Give me: dose, ${method==="espresso"?"yield, time, temp, pre-brew":(method==="mo
           </div>
 
           <div className="method-row">
-            {METHODS.map(m=><button key={m} className={"method-btn"+(method===m?" active":"")} onClick={()=>{setMethod(m);setTab("shot");setDiagInput("");setCompass(null);setShotTime("");setShotYield("");setDiagFollowup("");setLastDiagCtx("");}}>
+            {METHODS.map(m=><button key={m} className={"method-btn"+(method===m?" active":"")} onClick={()=>{setMethod(m);setTab("shot");setDiagInput("");setCompass(null);setTastes([]);setCompassRes(null);setShowNote(false);setRedial(false);setShotTime("");setShotYield("");setDiagFollowup("");setLastDiagCtx("");}}>
               {METHOD_LABELS[m]}
             </button>)}
           </div>
@@ -1613,6 +2229,16 @@ Give me: dose, ${method==="espresso"?"yield, time, temp, pre-brew":(method==="mo
               {md.whatWorked&&<div className="sec"><div className="sec-lbl">What Worked</div><div className="sec-txt" style={{color:"var(--green)"}}>{md.whatWorked}</div></div>}
               {md.whatDidnt&&<div className="sec"><div className="sec-lbl">What Didn't</div><div className="sec-txt" style={{color:"var(--red)"}}>{md.whatDidnt}</div></div>}
               {method==="espresso"&&md.iced&&<div className="sec"><div className="sec-lbl">Iced</div><div className="sec-txt" style={{color:"var(--blue)"}}>{md.iced}</div></div>}
+              {(()=>{
+                const ci=costInfo(cur,md.dose),si=stockInfo(cur,md.dose);
+                return<div className="sec"><div className="sec-lbl">Stock & Cost</div>
+                  {!ci&&!si&&<div className="sec-txt" style={{fontSize:12}}>Add price, bag size and remaining grams in Edit to see cost per shot and get a low-stock warning.</div>}
+                  {si&&<><div className="stock-bar"><span style={{width:(si.pct===null?100:si.pct)+"%",background:si.empty?"var(--red)":si.low?"var(--gold)":"var(--green)"}}/></div>
+                    <div className="sec-txt" style={{fontSize:13}}>{si.rem}g{si.total?" of "+si.total+"g":""} left · about {si.doses} {si.doses===1?"dose":"doses"}{si.low?" · running low":""}{si.empty?" · empty":""}</div></>}
+                  {ci&&<div className="sec-txt" style={{fontSize:13,marginTop:4}}>{money(ci.per250)} per 250g · {money(ci.perKg)}/kg{ci.perDose?" · "+money(ci.perDose)+" per "+md.dose+"g dose":""}</div>}
+                  {si&&num(md.dose)&&<div className="fa"><button className="btn sm" disabled={si.empty} onClick={useDose}>Used a dose (−{md.dose}g)</button>{si.empty&&cur.inStock!==false&&<button className="btn sm" onClick={()=>updB("inStock",false)}>Mark out of stock</button>}</div>}
+                </div>;
+              })()}
               <div className="div"/>
               <button className="btn d sm" onClick={()=>delBean(cur.id)}>Delete Bean</button>
             </>}
@@ -1673,31 +2299,71 @@ Give me: dose, ${method==="espresso"?"yield, time, temp, pre-brew":(method==="mo
               <AiBox showSave={true}/>
             </>}
 
-            {tab==="diagnose"&&<>
-              <Compass onSelect={setCompass} selected={compass}
-                zones={method==="espresso"?ESPRESSO_ZONES:method==="aeropress"?AEROPRESS_ZONES:method==="moccamaster"?MOCCA_ZONES:POUROVER_ZONES}
-                title={method==="espresso"?"Espresso Compass":method==="aeropress"?"AeroPress Compass":method==="moccamaster"?"Moccamaster Compass":"Pour Over Compass"}
-                subtitle="Tap a numbered zone that matches your cup"
-                axisTop={method==="espresso"?["Under-extracted","Balanced","Over-extracted"]:method==="aeropress"||method==="moccamaster"?["Under-extracted","Balanced","Over-extracted"]:["Fast / Under","Balanced","Slow / Over"]}
-                axisBottom={method==="espresso"?["Strong","Weak"]:["Full Body","Thin"]}
-              />
-              {method==="espresso"&&<div className="diag-row">
-                <div><span className="diag-label">Shot Time (s)</span><input className="diag-input" value={shotTime} onChange={e=>setShotTime(e.target.value)} placeholder="e.g. 32"/></div>
-                <div><span className="diag-label">Actual Yield (g)</span><input className="diag-input" value={shotYield} onChange={e=>setShotYield(e.target.value)} placeholder="e.g. 36"/></div>
-              </div>}
-              <div className="sec-lbl" style={{marginBottom:6}}>Describe Your Cup</div>
-              <textarea className="ai-ta" rows={3} placeholder={method==="espresso"?"Taste, texture, finish...":method==="aeropress"?"e.g. 'Muddy, over-extracted...'":method==="moccamaster"?"e.g. 'Thin and a little sour, brewed in 4:30...'":"e.g. 'Flat, no clarity...'"} value={diagInput} onChange={e=>setDiagInput(e.target.value)}/>
-              <div className="fa" style={{marginBottom:14}}>
-                <button className="btn ai" disabled={aiLoading||(!diagInput.trim()&&!compass)} onClick={()=>runDiagnosis()}>{aiLoading?"Diagnosing...":"Diagnose"}</button>
-                {(aiResult||diagInput||compass)&&<button className="btn sm" onClick={()=>{setAiResult("");setDiagInput("");setCompass(null);setShotTime("");setShotYield("");setDiagFollowup("");setLastDiagCtx("");}}>Clear</button>}
-              </div>
-              <AiBox/>
-              {aiResult&&!aiLoading&&<div style={{marginTop:-4,marginBottom:14}}>
-                <div className="sec-lbl" style={{marginBottom:6}}>Made an adjustment? Pull again and tell me what happened</div>
-                <textarea className="ai-ta" rows={2} placeholder="e.g. 'Went finer to 0·, shot ran 34s now, still a bit sour' or 'Fixed puck prep, tastes much better now'" value={diagFollowup} onChange={e=>setDiagFollowup(e.target.value)}/>
-                <button className="btn ai" disabled={aiLoading||!diagFollowup.trim()} onClick={()=>runDiagnosis(diagFollowup)}>{aiLoading?"Checking...":"Get Next Step"}</button>
-              </div>}
-            </>}
+            {tab==="diagnose"&&(()=>{
+              const zones=zonesFor(method);
+              const shots=cur.shots?.[method]||[];
+              const dl=cur.dialed?.[method];
+              const zone=compass||inferZone(zones,tastes);
+              if(dl&&!redial)return<div className="dialed-card">
+                <div className="dialed-badge">✓ Dialed in</div>
+                <div className="dialed-sub">{fmtDate(dl.date)}{dl.shots?" · "+dl.shots+" dial-in "+(dl.shots===1?"shot":"shots"):""} · {METHOD_LABELS[method]}</div>
+                <div className="pg" style={{marginBottom:12}}>
+                  <div className="pm"><div className="pm-lbl">Grind</div><div className="pm-val">{dl.grind||"—"}</div></div>
+                  <div className="pm"><div className="pm-lbl">Dose</div><div className="pm-val">{dl.dose||"—"}<span className="pm-unit">g</span></div></div>
+                  {method==="espresso"?<div className="pm"><div className="pm-lbl">Yield</div><div className="pm-val">{dl.yield||"—"}<span className="pm-unit">g</span></div></div>:<div className="pm"><div className="pm-lbl">Water</div><div className="pm-val">{dl.water||"—"}<span className="pm-unit">{method==="moccamaster"?"ml":"g"}</span></div></div>}
+                  <div className="pm"><div className="pm-lbl">Time</div><div className="pm-val">{dl.time||"—"}{method==="espresso"&&dl.time?<span className="pm-unit">s</span>:null}</div></div>
+                </div>
+                <div className="fa">
+                  <button className="btn p sm" onClick={()=>setCardDlg(method)}>Share Card</button>
+                  <button className="btn sm" onClick={()=>setRedial(true)}>Re-dial</button>
+                </div>
+              </div>;
+              return<>
+                {dl&&<button className="btn-link" onClick={()=>setRedial(false)}>← Back to dialed settings</button>}
+                <CompassV2 zones={zones} selected={compass} onSelect={z=>{setCompass(z);setCompassRes(null);}} trail={shots.slice(-5)}/>
+                <div className="cv2-hint">{compass?compass.label+": "+compass.desc:"Tap where your cup landed, or just pick tastes below."}</div>
+                <div className="sec-lbl" style={{margin:"8px 0 6px"}}>Taste</div>
+                <div className="tchips">{TASTE_CHIPS.map(c=><button key={c.id} className={"tchip"+(tastes.includes(c.id)?" on":"")+(c.good?" good":"")} onClick={()=>{setTastes(t=>t.includes(c.id)?t.filter(x=>x!==c.id):[...t,c.id]);setCompassRes(null);}}>{c.label}</button>)}</div>
+                {method==="espresso"&&<div className="diag-row" style={{marginTop:12,marginBottom:4}}>
+                  <div><span className="diag-label">Shot time (s)</span><input className="diag-input" inputMode="decimal" value={shotTime} onChange={e=>setShotTime(e.target.value)} placeholder={md.time||"e.g. 30"}/></div>
+                  <div className="diag-hint">Using {md.dose}g in, {md.yield}g out, grind {lg?grindLabel(lg.position):"not logged"}.</div>
+                </div>}
+                <div><button className="btn-link" onClick={()=>setShowNote(s=>!s)}>{showNote?"Hide note":"+ Add a note"}</button></div>
+                {showNote&&<textarea className="ai-ta" rows={2} placeholder="Anything else about the cup or the pull..." value={diagInput} onChange={e=>setDiagInput(e.target.value)}/>}
+                <div className="fa" style={{margin:"10px 0 14px"}}>
+                  <button className="btn p" disabled={!zone} onClick={getMove}>Log shot & get next move</button>
+                  {(compass||tastes.length>0||compassRes)&&<button className="btn sm" onClick={()=>{setCompass(null);setTastes([]);setCompassRes(null);setShotTime("");setDiagInput("");}}>Clear</button>}
+                </div>
+                {compassRes&&(()=>{const mv=compassRes.mv;return<div className="move-card">
+                  <div className="move-eyebrow">{mv.lockable?"Verdict":"Next move"}</div>
+                  <div className="move-title" style={{color:compassRes.zone.color}}>{mv.title}</div>
+                  <div className="move-body">{mv.move}</div>
+                  {compassRes.newGrind&&lg&&<div className="move-grind">{grindLabel(lg.position)} → {grindLabel(compassRes.newGrind)}</div>}
+                  {compassRes.applied&&<div className="move-why" style={{color:"var(--green)"}}>Grind logged. Pull again and log the next shot.</div>}
+                  <div className="move-why">{mv.why}</div>
+                  {mv.trend&&<div className={"move-trend "+(mv.trend.good?"good":"bad")}>{mv.trend.text}</div>}
+                  {mv.flags.map((f,i)=><div key={i} className="move-flag">{f}</div>)}
+                  <div className="fa">
+                    {compassRes.newGrind&&<button className="btn p sm" onClick={()=>applyGrindMove(compassRes.newGrind)}>Log grind {grindLabel(compassRes.newGrind)}</button>}
+                    {mv.lockable?<button className="btn p sm" onClick={lockIn}>Lock it in</button>:<button className="btn sm" onClick={lockIn}>Mark dialed</button>}
+                    <button className="btn ai sm" disabled={aiLoading} onClick={()=>runDiagnosis()}>{aiLoading?"Asking...":"Ask AI"}</button>
+                  </div>
+                </div>;})()}
+                <AiBox/>
+                {shots.length>0&&<>
+                  <div className="sec-lbl" style={{margin:"6px 0 8px"}}>Dial-In Shots ({shots.length})</div>
+                  <div className="gl">{[...shots].reverse().slice(0,6).map((s,i)=>{const z=zones.find(q=>q.id===s.zone);return<div key={s.id} className="ge">
+                    <div>
+                      <div className="ge-pos" style={{fontSize:14,letterSpacing:0}}><span className="zdot" style={{background:z?z.color:"#888"}}/>{z?z.label.replace(" ✓",""):"—"}</div>
+                      <div className="ge-date">{fmtDate(s.date)} · grind {s.grind?grindLabel(s.grind):"—"}{s.time?" · "+s.time+(method==="espresso"?"s":""):""}{s.move&&s.move!=="hold the grind"?" · "+s.move:""}</div>
+                    </div>
+                    <button className="btn sm" onClick={()=>delShot(s.id)}>✕</button>
+                  </div>;})}</div>
+                </>}
+                <button className="btn-link" onClick={()=>setShowZones(s=>!s)}>{showZones?"Hide all zones":"Show all zones"}</button>
+                {showZones&&<div className="compass-legend">{zones.map(z=><button key={z.id} className={"compass-legend-item"+(compass?.id===z.id?" sel":"")} onClick={()=>{setCompass(compass?.id===z.id?null:z);setCompassRes(null);}}><span className="compass-legend-dot" style={{background:z.color}}>{z.n}</span>{z.label}</button>)}</div>}
+              </>;
+            })()}
 
             {tab==="info"&&<>
               {(cur.altitude||cur.varietal||cur.flavorProfile)&&<div className="pg" style={{marginBottom:14}}>
@@ -1766,6 +2432,8 @@ Give me: dose, ${method==="espresso"?"yield, time, temp, pre-brew":(method==="mo
         })()}
       </div>
     </div>}
+
+    {screen==="stats"&&<div className="screen-body"><StatsScreen beans={beans} awayLog={awayLog} matches={matchHistory}/></div>}
 
     {screen==="discovery"&&<div className="screen-body">
       <div className="tc">
@@ -1842,11 +2510,26 @@ Give me: dose, ${method==="espresso"?"yield, time, temp, pre-brew":(method==="mo
               <TopRated rows={originByRatingRows} title="Top Origins by Rating" onSelect={setDiscoveryDrill}/>
               <TopRated rows={procRows} title="Top Processes" onSelect={setDiscoveryDrill}/>
               <TopRated rows={roastRows} title="Top Roast Levels" onSelect={setDiscoveryDrill}/>
+              <div style={{marginBottom:16}}>
+                <div className="sec-lbl" style={{marginBottom:8}}>Roasters</div>
+                {rStats.length===0?<div className="empty-grind">Add roasters to your beans to see them here</div>:
+                  <div className="rank-list">
+                    {rStats.slice(0,8).map((r,i)=><button key={r.key} className="rank-row" onClick={()=>setDiscoveryDrill(r)}>
+                      <span className="rank-num">{i+1}</span>
+                      <span className="rank-lbl">{r.k}</span>
+                      <span className="rank-n">{r.n} {r.n===1?"bean":"beans"}{r.limited?" · limited data":""}</span>
+                      {r.rated>0&&<span className="rank-avg">{r.avg.toFixed(1)}</span>}
+                    </button>)}
+                  </div>}
+                {rStats.length>8&&<div style={{fontSize:11,color:"var(--muted)",marginTop:6}}>Top 8 of {rStats.length} roasters. Ranked with a small-sample adjustment, so one great bean does not outrank a roaster you have rated many times.</div>}
+                {rGroups.some(g=>g.mixed)&&<button className="btn sm" style={{marginTop:8}} onClick={openCleanup}>Merge mixed spellings</button>}
+              </div>
             </>}
             {discoveryDrill&&<div className="modal-overlay" onClick={()=>setDiscoveryDrill(null)}>
               <div className="modal" onClick={e=>e.stopPropagation()}>
                 <h2>{discoveryDrill.k}</h2>
                 <p>{discoveryDrill.n} tried{discoveryDrill.avg>0?` · ${discoveryDrill.avg.toFixed(1)} avg rating`:""}</p>
+                {discoveryDrill.key&&<p style={{marginTop:4}}>{discoveryDrill.inStock} in stock{discoveryDrill.best?` · best: ${discoveryDrill.best.name} (${discoveryDrill.best.rating.toFixed(1)})`:""}{discoveryDrill.worst?` · lowest: ${discoveryDrill.worst.name} (${discoveryDrill.worst.rating.toFixed(1)})`:""}</p>}
                 <div className="gl" style={{marginTop:10}}>
                   {[...discoveryDrill.items].sort((a,b)=>(b.rating||0)-(a.rating||0)).map((item,i)=><div key={i} className="ge">
                     <div>
@@ -1857,6 +2540,7 @@ Give me: dose, ${method==="espresso"?"yield, time, temp, pre-brew":(method==="mo
                   </div>)}
                 </div>
                 <div className="fa" style={{marginTop:14}}>
+                  {discoveryDrill.key&&<button className="btn" onClick={()=>{setRenameDlg({key:discoveryDrill.key,from:discoveryDrill.k,to:discoveryDrill.k});setDiscoveryDrill(null);}}>Rename</button>}
                   <button className="btn" onClick={()=>setDiscoveryDrill(null)}>Close</button>
                 </div>
               </div>
@@ -1864,10 +2548,42 @@ Give me: dose, ${method==="espresso"?"yield, time, temp, pre-brew":(method==="mo
           </>;
         })()}
         <div className="div"/>
-        <div className="sec-lbl" style={{marginBottom:8}}>AI Recommendations</div>
-        <button className="btn ai" disabled={discoveryLoading} onClick={runDiscovery}>{discoveryLoading?"Analyzing...":"Analyze & Recommend"}</button>
-        {discoveryLoading&&<div className="ai-loading" style={{marginTop:10}}><div className="ai-dot"/><div className="ai-dot"/><div className="ai-dot"/></div>}
-        {discoveryResult&&<div className="ai-box" style={{marginTop:12}}><div className="ai-lbl">Result</div><div className="ai-result">{cleanMd(discoveryResult)}</div></div>}
+        <div className="sec-lbl" style={{marginBottom:6}}>Find Beans to Try</div>
+        <p style={{fontSize:13,color:"var(--muted)",marginTop:-2,marginBottom:12}}>Searches the web for real coffees that are for sale now, picked from your ratings, your notes, and what you rate low.</p>
+        {(()=>{
+          const gaps=tasteGaps(beans,awayLog);
+          return<>
+            {gaps.avoid.length>0&&<div style={{marginBottom:8}}><div className="sec-lbl" style={{marginBottom:6}}>You rate low</div>{gaps.avoid.map(a=><span key={a.k} className="gap-pill avoid">{a.k} · {a.avg.toFixed(1)}</span>)}</div>}
+            {(gaps.originsMissing.length>0||gaps.procsMissing.length>0)&&<div style={{marginBottom:10}}><div className="sec-lbl" style={{marginBottom:6}}>Not tried yet</div>{[...gaps.procsMissing,...gaps.originsMissing.slice(0,6)].map(g=><span key={g} className="gap-pill">{g}</span>)}</div>}
+          </>;
+        })()}
+        <div className="sec-lbl" style={{marginBottom:6}}>Budget per 250g</div>
+        <div className="bud-row">{[["any","Any"],["20","$20"],["25","$25"],["30","$30"]].map(([v,l])=><button key={v} className={"bud"+(budget===v?" on":"")} onClick={()=>setBudget(v)}>{l}</button>)}</div>
+        <div className="sec-lbl" style={{marginBottom:6}}>Roaster shops to check (optional)</div>
+        <textarea className="ai-ta" rows={2} style={{marginBottom:8}} placeholder="Paste up to 4 shop links, one per line. Used first, and as a backup if web search is off." value={shopUrls} onChange={e=>{setShopUrls(e.target.value);try{localStorage.setItem(SHOPURLS_KEY,e.target.value);}catch(err){}}}/>
+        <div className="fa" style={{marginTop:0}}>
+          <button className="btn ai" disabled={suggLoading} onClick={runFind}>{suggLoading?"Searching...":"Find real beans"}</button>
+          <button className="btn sm" disabled={discoveryLoading} onClick={runDiscovery}>{discoveryLoading?"Analyzing...":"Taste summary only"}</button>
+        </div>
+        {suggLoading&&<><div className="ai-loading" style={{marginTop:10}}><div className="ai-dot"/><div className="ai-dot"/><div className="ai-dot"/></div><div style={{fontSize:11,color:"var(--muted)",marginTop:6}}>Searching and reading product pages. This can take up to a minute.</div></>}
+        {suggError&&<div style={{color:"var(--red)",fontSize:12,marginTop:10,lineHeight:1.5}}>{suggError}</div>}
+        {sugg&&sugg.picks&&<div style={{marginTop:14}}>
+          {sugg.profile&&<div className="sec-txt" style={{fontSize:13,marginBottom:10}}>{sugg.profile}</div>}
+          {sugg.picks.map((p,i)=>{const rr=rStats.find(r=>r.key===rKey(p.roaster));return<div key={i} className="pick">
+            <div className="pick-top"><span className={"pick-tier "+p.tier}>{p.tier==="safe"?"Safe pick":p.tier==="wild"?"Wild card":"Stretch"}</span>{p.matchPct!==null&&<span className="pick-match">{p.matchPct}%</span>}</div>
+            <div className="pick-name">{p.name||"Unnamed coffee"}</div>
+            <div className="pick-roaster">{p.roaster}{rr&&rr.rated>0?" · you rate them "+rr.avg.toFixed(1)+" avg ("+rr.rated+(rr.rated===1?" bean":" beans")+")":""}</div>
+            <div className="pick-meta">{[p.origin,p.process,p.roast,p.price].filter(Boolean).join(" · ")}</div>
+            {p.notes&&<div className="pick-notes">{p.notes}</div>}
+            {p.why&&<div className="pick-why">{p.why}</div>}
+            <div className="fa">
+              {p.url&&<a className="btn sm" href={p.url} target="_blank" rel="noopener noreferrer" style={{textDecoration:"none"}}>Open page{p.inStock===false?" (out of stock)":""}</a>}
+              <button className="btn p sm" onClick={()=>addSuggestion(p)}>Add to my beans</button>
+            </div>
+          </div>;})}
+          <div style={{fontSize:11,color:"var(--muted)"}}>Found {fmtDate(sugg.date)}. Always check the page for current price and stock.</div>
+        </div>}
+        {discoveryResult&&<div className="ai-box" style={{marginTop:12}}><div className="ai-lbl">Taste summary</div><div className="ai-result">{cleanMd(discoveryResult)}</div></div>}
 
         <div className="div"/>
         <div className="sec-lbl" style={{marginBottom:8}}>Scan & Match</div>
@@ -1936,7 +2652,7 @@ Give me: dose, ${method==="espresso"?"yield, time, temp, pre-brew":(method==="mo
           <div className="div"/>
           <div className="fg">
             <Field label="Bean / Coffee Name" value={awayDraft.name} onChange={v=>setAwayDraft(d=>({...d,name:v}))}/>
-            <Field label="Roaster" value={awayDraft.roaster} onChange={v=>setAwayDraft(d=>({...d,roaster:v}))}/>
+            <RoasterField value={awayDraft.roaster} onChange={v=>setAwayDraft(d=>({...d,roaster:v}))} groups={rGroups}/>
             <Field label="Where" value={awayDraft.place} onChange={v=>setAwayDraft(d=>({...d,place:v}))} placeholder="Cafe or location"/>
             <Field label="Method" value={awayDraft.method} onChange={v=>setAwayDraft(d=>({...d,method:v}))} placeholder="Pour over, espresso..."/>
             <Field label="Origin" value={awayDraft.origin} onChange={v=>setAwayDraft(d=>({...d,origin:v}))}/>
@@ -2005,6 +2721,36 @@ Give me: dose, ${method==="espresso"?"yield, time, temp, pre-brew":(method==="mo
         </div>
         <div style={{borderTop:"1px solid var(--border)",paddingTop:12}}>
           <button className="btn ai" style={{width:"100%"}} onClick={async()=>{window._COFFEE_API_KEY=apiKeyInput.trim()||window._COFFEE_API_KEY;const r=await callClaude("You are a helpful assistant.","Say only: API key working!");alert(r);}}>Test Connection</button>
+        </div>
+      </div>
+    </div>}
+
+    {cardDlg&&cur&&<BrewCardModal bean={cur} method={cardDlg} dialed={cur.dialed?.[cardDlg]} onClose={()=>setCardDlg(null)}/>}
+    {cleanupDlg&&<div className="modal-overlay" onClick={()=>setCleanupDlg(null)}>
+      <div className="modal" onClick={e=>e.stopPropagation()}>
+        <h2>Merge roaster names</h2>
+        <p>Tap the spelling to keep. Every bean from that roaster gets it.</p>
+        <div style={{marginTop:12}}>
+          {rGroups.filter(g=>g.mixed).map(g=><div key={g.key} style={{marginBottom:14}}>
+            <div className="sec-lbl" style={{marginBottom:6}}>{g.n} entries</div>
+            <div className="tchips">{g.variants.map(v=><button key={v} className={"tchip"+(cleanupDlg[g.key]===v?" on":"")} onClick={()=>setCleanupDlg(c=>({...c,[g.key]:v}))}>{v}</button>)}</div>
+          </div>)}
+          {rGroups.filter(g=>g.mixed).length===0&&<div className="sec-txt" style={{fontSize:13}}>Nothing to merge.</div>}
+        </div>
+        <div className="fa" style={{marginTop:6}}>
+          <button className="btn p" disabled={rGroups.filter(g=>g.mixed).length===0} onClick={applyCleanup}>Merge all</button>
+          <button className="btn" onClick={()=>setCleanupDlg(null)}>Cancel</button>
+        </div>
+      </div>
+    </div>}
+    {renameDlg&&<div className="modal-overlay" onClick={()=>setRenameDlg(null)}>
+      <div className="modal" onClick={e=>e.stopPropagation()}>
+        <h2>Rename roaster</h2>
+        <p>Changes the name on every bean and tasting log entry from {renameDlg.from}.</p>
+        <input style={{width:"100%",marginTop:12,background:"var(--bg3)",border:"1px solid var(--border)",color:"var(--text)",fontFamily:"'DM Mono',monospace",fontSize:16,padding:"10px 12px",outline:"none",borderRadius:0}} value={renameDlg.to} onChange={e=>setRenameDlg(r=>({...r,to:e.target.value}))} autoCapitalize="words"/>
+        <div className="fa" style={{marginTop:12}}>
+          <button className="btn p" disabled={!renameDlg.to.trim()} onClick={applyRename}>Rename</button>
+          <button className="btn" onClick={()=>setRenameDlg(null)}>Cancel</button>
         </div>
       </div>
     </div>}
