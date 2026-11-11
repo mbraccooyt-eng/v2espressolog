@@ -273,6 +273,7 @@ function shrinkImage(dataUrl, maxDim, q) {
 }
 const PHOTO_MAX = 720,
   PHOTO_Q = 0.72;
+const DRAFT_KEY = "coffeeLog_draft_v1";
 function loadAutoBackup() {
   try {
     const r = localStorage.getItem(BACKUP_KEY);
@@ -650,6 +651,7 @@ function similarRoaster(name, groups) {
 }
 function roasterStats(beans, awayLog) {
   const items = [...beans.map(b => ({
+    id: b.id,
     roaster: b.roaster,
     name: b.name,
     rating: b.rating || 0,
@@ -1519,7 +1521,9 @@ function BrewCardModal({
 function StatsScreen({
   beans,
   awayLog,
-  matches
+  matches,
+  onRoaster,
+  onBean
 }) {
   const rs = roasterStats(beans, awayLog);
   const rated = beans.filter(b => b.rating > 0);
@@ -1544,9 +1548,32 @@ function StatsScreen({
     grams = priced.reduce((s, b) => s + num(b.bagGrams), 0);
   const perDoseList = priced.map(b => costInfo(b, b.methods?.espresso?.dose)).filter(c => c && c.perDose).map(c => c.perDose);
   const avgDose = perDoseList.length ? perDoseList.reduce((a, b) => a + b, 0) / perDoseList.length : null;
+  const monthOf = e => {
+    if (e && e.id > 1e12) {
+      const d = new Date(e.id);
+      return d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0") + "-" + d.getDate();
+    }
+    const t = String(e && e.date || "");
+    let m = t.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
+    if (m) return m[1] + "-" + m[2].padStart(2, "0") + "-" + +m[3];
+    m = t.match(/^(\d{1,2})\/(\d{1,2})\/(\d{2,4})/);
+    if (m) return (m[3].length === 2 ? "20" + m[3] : m[3]) + "-" + m[1].padStart(2, "0") + "-" + +m[2];
+    return null;
+  };
+  const dayMap = {};
+  beans.forEach(b => METHODS.forEach(m => {
+    [...(b.grindLogs?.[m] || []), ...(b.shots?.[m] || []), ...(b.savedRecipes?.[m] || [])].forEach(e => {
+      const k = monthOf(e);
+      if (k) dayMap[b.id + "|" + m + "|" + k] = {
+        method: m,
+        month: k.slice(0, 7)
+      };
+    });
+  }));
+  const brewDays = Object.values(dayMap);
   const byMethod = METHODS.map(m => ({
     m,
-    n: allShots.filter(s => s.method === m).length
+    n: brewDays.filter(d => d.method === m).length
   }));
   const maxM = Math.max(1, ...byMethod.map(x => x.n));
   const months = [];
@@ -1561,9 +1588,8 @@ function StatsScreen({
       n: 0
     });
   }
-  allShots.forEach(s => {
-    const k = String(s.date || "").slice(0, 7);
-    const mo = months.find(x => x.key === k);
+  brewDays.forEach(d => {
+    const mo = months.find(x => x.key === d.month);
     if (mo) mo.n++;
   });
   const maxMo = Math.max(1, ...months.map(x => x.n));
@@ -1615,9 +1641,15 @@ function StatsScreen({
   }, "Dialed In"))), React.createElement("div", {
     className: "sec-lbl",
     style: {
-      margin: "18px 0 8px"
+      margin: "18px 0 4px"
     }
-  }, "Dial-In Activity"), React.createElement("div", {
+  }, "Logging Activity"), React.createElement("div", {
+    className: "sec-txt",
+    style: {
+      fontSize: 12,
+      marginBottom: 8
+    }
+  }, "Days you logged a grind change, dial-in shot or recipe, by month and by method."), React.createElement("div", {
     className: "bars"
   }, months.map(mo => React.createElement("div", {
     key: mo.key,
@@ -1661,8 +1693,10 @@ function StatsScreen({
     key: i,
     className: "ge",
     style: {
-      alignItems: "flex-start"
-    }
+      alignItems: "flex-start",
+      cursor: "pointer"
+    },
+    onClick: () => onBean && onBean(x.bean.id)
   }, React.createElement("div", null, React.createElement("div", {
     className: "ge-pos",
     style: {
@@ -1687,12 +1721,10 @@ function StatsScreen({
     className: "empty-grind"
   }, "Rate a few beans to rank roasters") : React.createElement("div", {
     className: "rank-list"
-  }, rs.filter(r => r.rated > 0).slice(0, 5).map((r, i) => React.createElement("div", {
+  }, rs.filter(r => r.rated > 0).slice(0, 5).map((r, i) => React.createElement("button", {
     key: r.key,
     className: "rank-row",
-    style: {
-      cursor: "default"
-    }
+    onClick: () => onRoaster && onRoaster(r)
   }, React.createElement("span", {
     className: "rank-num"
   }, i + 1), React.createElement("span", {
@@ -1708,12 +1740,10 @@ function StatsScreen({
     }
   }, "Favorites"), React.createElement("div", {
     className: "rank-list"
-  }, fav.map((b, i) => React.createElement("div", {
+  }, fav.map((b, i) => React.createElement("button", {
     key: b.id,
     className: "rank-row",
-    style: {
-      cursor: "default"
-    }
+    onClick: () => onBean && onBean(b.id)
   }, React.createElement("span", {
     className: "rank-num"
   }, i + 1), React.createElement("span", {
@@ -3746,6 +3776,7 @@ function App() {
   });
   const [copied, setCopied] = useState(false);
   const [saveFailed, setSaveFailed] = useState(false);
+  const [resumed, setResumed] = useState(false);
   const [aiLoading, setAiLoading] = useState(false);
   const [aiResults, setAiResults] = useState({});
   const [diagInput, setDiagInput] = useState("");
@@ -3835,6 +3866,51 @@ function App() {
   useEffect(() => {
     saveBeans(beans);
   }, [beans]);
+  const draftReady = useRef(false);
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem(DRAFT_KEY);
+      if (raw) {
+        const d = JSON.parse(raw);
+        if (d && d.draft && Date.now() - (d.at || 0) < 3 * 864e5) {
+          if (d.mode === "add") {
+            setDraft(d.draft);
+            setAdding(true);
+            setEditing(false);
+            setShowList(false);
+            setScreen("beans");
+            if (d.method) setMethod(d.method);
+            setResumed(true);
+          } else if (d.mode === "edit" && beans.some(b => b.id === d.selId)) {
+            setSelId(d.selId);
+            setDraft(d.draft);
+            setEditing(true);
+            setAdding(false);
+            setShowList(false);
+            setScreen("beans");
+            if (d.method) setMethod(d.method);
+            setResumed(true);
+          } else localStorage.removeItem(DRAFT_KEY);
+        } else localStorage.removeItem(DRAFT_KEY);
+      }
+    } catch (e) {}
+    draftReady.current = true;
+  }, []);
+  useEffect(() => {
+    if (!draftReady.current) return;
+    try {
+      if ((adding || editing) && draft) localStorage.setItem(DRAFT_KEY, JSON.stringify({
+        mode: adding ? "add" : "edit",
+        selId,
+        method,
+        draft,
+        at: Date.now()
+      }));else {
+        localStorage.removeItem(DRAFT_KEY);
+        if (resumed) setResumed(false);
+      }
+    } catch (e) {}
+  }, [adding, editing, draft, selId, method]);
   useEffect(() => {
     const h = e => setSaveFailed(!(e.detail && e.detail.ok));
     window.addEventListener("coffeelog-save", h);
@@ -5229,6 +5305,9 @@ Give me: dose, ${method === "espresso" ? "yield, time, temp, pre-brew" : method 
       .btn.timer-btn{border-radius:var(--r);font-size:14.5px;padding:13px;}
       .btn:disabled{opacity:.45;}
       .btn-link,.rf-link{font-family:var(--sans);font-size:13px;}
+      .resume-note{margin:6px 14px 0;padding:10px 14px;border:1px solid var(--border);border-radius:var(--r);background:var(--bg2);color:var(--text2);font-size:13px;display:flex;gap:12px;align-items:center;justify-content:space-between;line-height:1.45;}
+      .drill-modal{max-height:78vh;overflow-y:auto;}
+      .rank-row{width:100%;text-align:left;color:inherit;}
       .save-warn{margin:8px 14px 0;padding:13px 15px;border:1px solid var(--red);border-radius:var(--r);background:#2a1414;color:#f0d8d8;}
       /* list */
       .list-hdr{background:transparent;padding:4px 16px 12px;}
@@ -5312,9 +5391,9 @@ Give me: dose, ${method === "espresso" ? "yield, time, temp, pre-brew" : method 
       .screen-tab.active{color:var(--gold);border-bottom:none;}
       .nav-ic{width:23px;height:23px;display:block;}
       /* motion */
-      @keyframes fadeUp{from{opacity:0;transform:translateY(7px);}to{opacity:1;transform:none;}}
+      @keyframes fadeUp{from{opacity:0;transform:translateY(7px);}}
       @keyframes popIn{from{opacity:0;transform:scale(.96);}to{opacity:1;transform:none;}}
-      .screen-body,.list-scroll,.tc{animation:fadeUp .24s ease both;}
+      .screen-body,.list-scroll,.tc{animation:fadeUp .24s ease;}
       @media(prefers-reduced-motion:reduce){.screen-body,.list-scroll,.tc,.modal,.timer-modal{animation:none;}}
 
       @media(min-width:680px) and (min-height:680px){
@@ -5477,7 +5556,12 @@ Give me: dose, ${method === "espresso" ? "yield, time, temp, pre-brew" : method 
     strokeWidth: "1.7",
     strokeLinecap: "round",
     strokeLinejoin: "round"
-  }, icon), React.createElement("span", null, label)))), saveFailed && React.createElement("div", {
+  }, icon), React.createElement("span", null, label)))), resumed && (adding || editing) && React.createElement("div", {
+    className: "resume-note"
+  }, React.createElement("span", null, "Picked up where you left off. Nothing is saved until you tap Save."), React.createElement("button", {
+    className: "btn-link",
+    onClick: () => setResumed(false)
+  }, "OK")), saveFailed && React.createElement("div", {
     className: "save-warn"
   }, React.createElement("div", {
     style: {
@@ -6889,7 +6973,12 @@ Give me: dose, ${method === "espresso" ? "yield, time, temp, pre-brew" : method 
   }, React.createElement(StatsScreen, {
     beans: beans,
     awayLog: awayLog,
-    matches: matchHistory
+    matches: matchHistory,
+    onRoaster: setDiscoveryDrill,
+    onBean: id => {
+      setScreen("beans");
+      selectBean(id);
+    }
   })), screen === "discovery" && React.createElement("div", {
     className: "screen-body"
   }, React.createElement("div", {
@@ -6919,6 +7008,7 @@ Give me: dose, ${method === "espresso" ? "yield, time, temp, pre-brew" : method 
     const avgRating = allRated.length ? allRated.reduce((s, b) => s + b.rating, 0) / allRated.length : null;
     const topBean = [...allRated].sort((a, b) => b.rating - a.rating)[0];
     const allTried = [...beans.map(b => ({
+      id: b.id,
       name: b.name,
       roaster: b.roaster,
       origin: b.origin,
@@ -7139,53 +7229,7 @@ Give me: dose, ${method === "espresso" ? "yield, time, temp, pre-brew" : method 
         marginTop: 8
       },
       onClick: openCleanup
-    }, "Merge mixed spellings"))), discoveryDrill && React.createElement("div", {
-      className: "modal-overlay",
-      onClick: () => setDiscoveryDrill(null)
-    }, React.createElement("div", {
-      className: "modal",
-      onClick: e => e.stopPropagation()
-    }, React.createElement("h2", null, discoveryDrill.k), React.createElement("p", null, discoveryDrill.n, " tried", discoveryDrill.avg > 0 ? ` · ${discoveryDrill.avg.toFixed(1)} avg rating` : ""), discoveryDrill.key && React.createElement("p", {
-      style: {
-        marginTop: 4
-      }
-    }, discoveryDrill.inStock, " in stock", discoveryDrill.best ? ` · best: ${discoveryDrill.best.name} (${discoveryDrill.best.rating.toFixed(1)})` : "", discoveryDrill.worst ? ` · lowest: ${discoveryDrill.worst.name} (${discoveryDrill.worst.rating.toFixed(1)})` : ""), React.createElement("div", {
-      className: "gl",
-      style: {
-        marginTop: 10
-      }
-    }, [...discoveryDrill.items].sort((a, b) => (b.rating || 0) - (a.rating || 0)).map((item, i) => React.createElement("div", {
-      key: i,
-      className: "ge"
-    }, React.createElement("div", null, React.createElement("div", {
-      className: "ge-pos",
-      style: {
-        fontSize: 15,
-        letterSpacing: 0
-      }
-    }, item.name), React.createElement("div", {
-      className: "ge-date"
-    }, item.roaster || "—", " · ", item.source)), item.rating > 0 && React.createElement("div", {
-      className: "bc-rating"
-    }, item.rating.toFixed(1))))), React.createElement("div", {
-      className: "fa",
-      style: {
-        marginTop: 14
-      }
-    }, discoveryDrill.key && React.createElement("button", {
-      className: "btn",
-      onClick: () => {
-        setRenameDlg({
-          key: discoveryDrill.key,
-          from: discoveryDrill.k,
-          to: discoveryDrill.k
-        });
-        setDiscoveryDrill(null);
-      }
-    }, "Rename"), React.createElement("button", {
-      className: "btn",
-      onClick: () => setDiscoveryDrill(null)
-    }, "Close")))));
+    }, "Merge mixed spellings"))));
   })(), React.createElement("div", {
     className: "div"
   }), React.createElement("div", {
@@ -7763,7 +7807,69 @@ Give me: dose, ${method === "espresso" ? "yield, time, temp, pre-brew" : method 
         marginTop: 6
       }
     }, "Brewing Now")));
-  }))), showTimer && React.createElement(TimerModal, {
+  }))), discoveryDrill && React.createElement("div", {
+    className: "modal-overlay",
+    onClick: () => setDiscoveryDrill(null)
+  }, React.createElement("div", {
+    className: "modal drill-modal",
+    onClick: e => e.stopPropagation()
+  }, React.createElement("h2", null, discoveryDrill.k), React.createElement("p", null, discoveryDrill.n, " tried", discoveryDrill.avg > 0 ? ` · ${discoveryDrill.avg.toFixed(1)} avg rating` : ""), discoveryDrill.key && React.createElement("p", {
+    style: {
+      marginTop: 4
+    }
+  }, discoveryDrill.inStock, " in stock", discoveryDrill.best ? ` · best: ${discoveryDrill.best.name} (${discoveryDrill.best.rating.toFixed(1)})` : "", discoveryDrill.worst ? ` · lowest: ${discoveryDrill.worst.name} (${discoveryDrill.worst.rating.toFixed(1)})` : ""), React.createElement("div", {
+    className: "gl",
+    style: {
+      marginTop: 10
+    }
+  }, [...discoveryDrill.items].sort((a, b) => (b.rating || 0) - (a.rating || 0)).map((item, i) => React.createElement("div", {
+    key: i,
+    className: "ge",
+    style: item.id ? {
+      cursor: "pointer"
+    } : null,
+    onClick: item.id ? () => {
+      setDiscoveryDrill(null);
+      setScreen("beans");
+      selectBean(item.id);
+    } : undefined
+  }, React.createElement("div", null, React.createElement("div", {
+    className: "ge-pos",
+    style: {
+      fontSize: 15,
+      letterSpacing: 0
+    }
+  }, item.name), React.createElement("div", {
+    className: "ge-date"
+  }, item.roaster || "—", " · ", item.source)), React.createElement("div", {
+    style: {
+      display: "flex",
+      alignItems: "center",
+      gap: 8
+    }
+  }, item.rating > 0 && React.createElement("div", {
+    className: "bc-rating"
+  }, item.rating.toFixed(1)), item.id && React.createElement("span", {
+    className: "bc-arrow"
+  }, "›"))))), React.createElement("div", {
+    className: "fa",
+    style: {
+      marginTop: 14
+    }
+  }, discoveryDrill.key && React.createElement("button", {
+    className: "btn",
+    onClick: () => {
+      setRenameDlg({
+        key: discoveryDrill.key,
+        from: discoveryDrill.k,
+        to: discoveryDrill.k
+      });
+      setDiscoveryDrill(null);
+    }
+  }, "Rename"), React.createElement("button", {
+    className: "btn",
+    onClick: () => setDiscoveryDrill(null)
+  }, "Close")))), showTimer && React.createElement(TimerModal, {
     stages: timerStages,
     onClose: () => setShowTimer(false)
   }), showApiModal && React.createElement("div", {
