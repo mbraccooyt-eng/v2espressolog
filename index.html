@@ -21,11 +21,13 @@ const {
 } = React;
 const DOTS = 5,
   GRIND_MAX = 12;
-const METHODS = ["espresso", "aeropress", "pourover", "moccamaster"];
+const METHODS = ["espresso", "aeropress", "pourover", "switch", "moccamaster"];
+const perMethod = fn => Object.fromEntries(METHODS.map(m => [m, fn(m)]));
 const METHOD_LABELS = {
   espresso: "Espresso",
   aeropress: "AeroPress",
   pourover: "Pour Over",
+  switch: "Switch",
   moccamaster: "Moccamaster"
 };
 const STORAGE_KEY = "coffeeLog_v6";
@@ -68,6 +70,16 @@ const DEF = {
     whatWorked: "",
     whatDidnt: ""
   },
+  switch: {
+    dose: "20",
+    water: "300",
+    temp: "205",
+    steepTime: "120",
+    totalTime: "3:00",
+    notes: "",
+    whatWorked: "",
+    whatDidnt: ""
+  },
   moccamaster: {
     dose: "60",
     water: "1000",
@@ -103,7 +115,11 @@ const WATER_OPTS = ["150", "160", "170", "180", "190", "200", "210", "220"].map(
   value: v,
   label: v + "g"
 }));
-const STEEP_OPTS = ["45", "60", "75", "90", "105", "120", "150", "180"].map(v => ({
+const WATER_SWITCH = ["200", "225", "250", "275", "300", "320", "350"].map(v => ({
+  value: v,
+  label: v + "g"
+}));
+const STEEP_OPTS = ["45", "60", "75", "90", "105", "120", "150", "180", "210", "240"].map(v => ({
   value: v,
   label: v + "s"
 }));
@@ -147,55 +163,24 @@ function migrate(b) {
     thawedOn: "",
     price: "",
     bagGrams: "",
-    remainingG: "",
-    savedRecipes: {
-      aeropress: [],
-      pourover: [],
-      moccamaster: []
-    },
+    decaf: false,
+    bagHistory: [],
     ...b,
-    methods: {
-      espresso: {
-        ...DEF.espresso,
-        ...(b.methods?.espresso || {})
-      },
-      aeropress: {
-        ...DEF.aeropress,
-        ...(b.methods?.aeropress || {})
-      },
-      pourover: {
-        ...DEF.pourover,
-        ...(b.methods?.pourover || {})
-      },
-      moccamaster: {
-        ...DEF.moccamaster,
-        ...(b.methods?.moccamaster || {})
-      }
-    },
-    grindLogs: {
-      espresso: b.grindLogs?.espresso || [],
-      aeropress: b.grindLogs?.aeropress || [],
-      pourover: b.grindLogs?.pourover || [],
-      moccamaster: b.grindLogs?.moccamaster || []
-    },
+    methods: perMethod(m => ({
+      ...DEF[m],
+      ...(b.methods && b.methods[m] || {})
+    })),
+    grindLogs: perMethod(m => b.grindLogs && b.grindLogs[m] || []),
     savedRecipes: {
-      aeropress: [],
-      pourover: [],
-      moccamaster: [],
+      ...perMethod(() => []),
       ...(b.savedRecipes || {})
     },
     shots: {
-      espresso: [],
-      aeropress: [],
-      pourover: [],
-      moccamaster: [],
+      ...perMethod(() => []),
       ...(b.shots || {})
     },
     dialed: {
-      espresso: null,
-      aeropress: null,
-      pourover: null,
-      moccamaster: null,
+      ...perMethod(() => null),
       ...(b.dialed || {})
     }
   };
@@ -249,6 +234,7 @@ function shrinkImage(dataUrl, maxDim, q) {
       im.onload = () => {
         try {
           const r = Math.min(1, (maxDim || 1400) / Math.max(im.width, im.height));
+          if (r >= 1 && /^data:image\/jpe?g/i.test(dataUrl)) return res(dataUrl);
           const w = Math.max(1, Math.round(im.width * r)),
             h = Math.max(1, Math.round(im.height * r));
           const c = document.createElement("canvas");
@@ -271,9 +257,131 @@ function shrinkImage(dataUrl, maxDim, q) {
     }
   });
 }
-const PHOTO_MAX = 720,
-  PHOTO_Q = 0.72;
-const DRAFT_KEY = "coffeeLog_draft_v1";
+const PHOTO_MAX = 1100,
+  PHOTO_Q = 0.8;
+const HIDDEN_KEY = "coffeeLog_hiddenMethods";
+const DRAFT_KEY = "coffeeLog_draft_v1",
+  AWAYDRAFT_KEY = "coffeeLog_awaydraft_v1";
+const PHOTO_DB = "coffeeLogPhotos",
+  PHOTO_STORE = "photos";
+let _photoDB = null;
+function photoDB() {
+  if (_photoDB) return _photoDB;
+  _photoDB = new Promise((res, rej) => {
+    try {
+      const rq = indexedDB.open(PHOTO_DB, 1);
+      rq.onupgradeneeded = () => {
+        if (!rq.result.objectStoreNames.contains(PHOTO_STORE)) rq.result.createObjectStore(PHOTO_STORE);
+      };
+      rq.onsuccess = () => res(rq.result);
+      rq.onerror = () => rej(rq.error || new Error("open failed"));
+      rq.onblocked = () => rej(new Error("blocked"));
+    } catch (e) {
+      rej(e);
+    }
+  });
+  _photoDB.catch(() => {});
+  return _photoDB;
+}
+async function idbAllPhotos() {
+  const db = await photoDB();
+  return new Promise((res, rej) => {
+    const out = {};
+    const tx = db.transaction(PHOTO_STORE, "readonly");
+    const rq = tx.objectStore(PHOTO_STORE).openCursor();
+    rq.onsuccess = () => {
+      const c = rq.result;
+      if (c) {
+        out[String(c.key)] = c.value;
+        c.continue();
+      }
+    };
+    tx.oncomplete = () => res(out);
+    tx.onerror = () => rej(tx.error);
+    tx.onabort = () => rej(tx.error);
+  });
+}
+async function idbWritePhotos(puts, dels) {
+  const db = await photoDB();
+  return new Promise((res, rej) => {
+    const tx = db.transaction(PHOTO_STORE, "readwrite");
+    const st = tx.objectStore(PHOTO_STORE);
+    Object.entries(puts || {}).forEach(([k, v]) => st.put(v, k));
+    (dels || []).forEach(k => st.delete(k));
+    tx.oncomplete = () => res(true);
+    tx.onerror = () => rej(tx.error);
+    tx.onabort = () => rej(tx.error);
+  });
+}
+const PHOTO_SYNCED = {};
+let PHOTOS_HYDRATED = false;
+let PHOTO_SYNC_BUSY = false,
+  PHOTO_SYNC_AGAIN = false,
+  LATEST_BEANS = null;
+const photoKey = b => String(b.id);
+function stripSynced(beans) {
+  return beans.map(b => b.imageBase64 && PHOTO_SYNCED[photoKey(b)] === b.imageBase64 ? {
+    ...b,
+    imageBase64: ""
+  } : b);
+}
+function hasUnsyncedPhotos(beans) {
+  return PHOTOS_HYDRATED && beans.some(b => b.imageBase64 && PHOTO_SYNCED[photoKey(b)] !== b.imageBase64);
+}
+function writeBeansLS(b, quiet) {
+  let ok = true;
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(stripSynced(b)));
+  } catch (e) {
+    ok = false;
+  }
+  if (ok || !quiet) flagSave(ok);
+  return ok;
+}
+async function syncPhotos() {
+  if (!PHOTOS_HYDRATED || !LATEST_BEANS) return;
+  if (PHOTO_SYNC_BUSY) {
+    PHOTO_SYNC_AGAIN = true;
+    return;
+  }
+  PHOTO_SYNC_BUSY = true;
+  const beans = LATEST_BEANS;
+  let wrote = false,
+    failed = false;
+  try {
+    const puts = {},
+      dels = [],
+      live = {};
+    beans.forEach(b => {
+      const k = photoKey(b);
+      live[k] = 1;
+      if (b.imageBase64) {
+        if (PHOTO_SYNCED[k] !== b.imageBase64) puts[k] = b.imageBase64;
+      } else if (PHOTO_SYNCED[k] !== undefined) dels.push(k);
+    });
+    if (beans.length > 0) Object.keys(PHOTO_SYNCED).forEach(k => {
+      if (!live[k]) dels.push(k);
+    });else dels.length = 0;
+    if (Object.keys(puts).length || dels.length) {
+      await idbWritePhotos(puts, dels);
+      Object.entries(puts).forEach(([k, v]) => {
+        PHOTO_SYNCED[k] = v;
+      });
+      dels.forEach(k => {
+        delete PHOTO_SYNCED[k];
+      });
+      wrote = Object.keys(puts).length > 0;
+    }
+  } catch (e) {
+    failed = true;
+  }
+  PHOTO_SYNC_BUSY = false;
+  if ((wrote || failed) && LATEST_BEANS) writeBeansLS(LATEST_BEANS, false);
+  if (PHOTO_SYNC_AGAIN) {
+    PHOTO_SYNC_AGAIN = false;
+    syncPhotos();
+  }
+}
 function loadAutoBackup() {
   try {
     const r = localStorage.getItem(BACKUP_KEY);
@@ -286,13 +394,9 @@ function loadAutoBackup() {
 }
 function saveBeans(b) {
   if (LOAD_FAILED) return;
-  let ok = true;
-  try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(b));
-  } catch (e) {
-    ok = false;
-  }
-  flagSave(ok);
+  LATEST_BEANS = b;
+  writeBeansLS(b, hasUnsyncedPhotos(b));
+  syncPhotos();
   try {
     const prev = loadAutoBackup();
     if (b.length > 0 && (!prev || b.length >= prev.beans.length * 0.5)) {
@@ -388,19 +492,6 @@ function grindLabel(pos) {
   if (pos.dot === 0) return String(pos.whole);
   return pos.whole + "·".repeat(pos.dot);
 }
-function daysAgo(s) {
-  if (!s) return null;
-  const d = new Date(s);
-  if (isNaN(d)) return null;
-  const n = Math.floor((Date.now() - d.getTime()) / 86400000);
-  return n === 0 ? "Today" : n === 1 ? "1 day ago" : n + " days ago";
-}
-function daysAgoNum(s) {
-  if (!s) return null;
-  const d = new Date(s);
-  if (isNaN(d)) return null;
-  return Math.floor((Date.now() - d.getTime()) / 86400000);
-}
 function fmtDate(s) {
   if (!s) return "";
   const d = new Date(s + (s.length <= 10 ? "T00:00:00" : ""));
@@ -409,6 +500,14 @@ function fmtDate(s) {
     dd = String(d.getDate()).padStart(2, "0"),
     yy = String(d.getFullYear()).slice(-2);
   return `${mm}/${dd}/${yy}`;
+}
+function toISODate(s) {
+  if (!s) return "";
+  const m = String(s).match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
+  if (m) return m[1] + "-" + m[2].padStart(2, "0") + "-" + m[3].padStart(2, "0");
+  const d = new Date(s);
+  if (isNaN(d)) return "";
+  return d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0") + "-" + String(d.getDate()).padStart(2, "0");
 }
 function parseD(s) {
   if (!s) return null;
@@ -483,12 +582,18 @@ const FRESH_RULES = {
 };
 function freshRule(b, method) {
   const r = FRESH_RULES[b.roast] || FRESH_RULES["Medium"];
-  return {
-    ready: !method || method === "espresso" ? r.esp : r.fil,
+  const ready = !method || method === "espresso" ? r.esp : r.fil;
+  return b.decaf ? {
+    ready: Math.max(3, Math.round(ready * 0.6)),
+    peak: Math.round(r.peak * 0.7),
+    aging: Math.round(r.aging * 0.7)
+  } : {
+    ready,
     peak: r.peak,
     aging: r.aging
   };
 }
+const decafNote = b => b && b.decaf ? " This is a DECAF coffee: it usually wants a finer grind, extracts faster and goes stale sooner than regular coffee." : "";
 function inDaysLabel(n) {
   const d = new Date();
   d.setDate(d.getDate() + n);
@@ -519,7 +624,7 @@ function freshness(b, method) {
   if (n === null) return null;
   const r = freshRule(b, method),
     ml = (METHOD_LABELS[method || "espresso"] || "espresso").toLowerCase(),
-    rl = b.roast ? b.roast.toLowerCase() + " roast" : "this roast";
+    rl = (b.decaf ? "decaf " : "") + (b.roast ? b.roast.toLowerCase() + " roast" : "coffee like this");
   if (n < r.ready) {
     const left = r.ready - n;
     return {
@@ -531,7 +636,7 @@ function freshness(b, method) {
   if (n <= r.peak) return {
     label: "Peak",
     color: "var(--green)",
-    note: "In its best window for " + ml + " until about " + inDaysLabel(r.peak - n) + "."
+    note: "In its best window for " + ml + " until about " + inDaysLabel(r.peak - n) + "." + (b.decaf ? " Decaf fades sooner than regular coffee." : "")
   };
   if (n <= r.aging) return {
     label: "Aging",
@@ -862,7 +967,9 @@ function nextMove(c) {
   } else if (CLOSE_ZONES.includes(zone.id) && side === "center") {
     out.title = "Very close";
     out.lockable = true;
-    out.move = "Leave it, or make one tiny change: " + fmtSteps(zone.x < sw.x ? -1 : 1) + ". If you like the cup, lock it in.";
+    let tiny = zone.x < sw.x ? -1 : 1;
+    if (method === "espresso" && t && (t > 35 && tiny < 0 || t < 22 && tiny > 0)) tiny = 0;
+    out.move = tiny ? "Leave it, or make one tiny change: " + fmtSteps(tiny) + ". If you like the cup, lock it in." : "Leave the grind alone. If you like the cup, lock it in.";
     out.steps = 0;
     out.why = zone.fix;
   } else if (method === "espresso") {
@@ -1313,12 +1420,10 @@ async function drawBrewCard(bean, method, dialed) {
   x.roundRect ? x.roundRect(ix, iy, S, S, 28) : x.rect(ix, iy, S, S);
   x.clip();
   if (im) {
-    const r = Math.max(S / im.width, S / im.height);
-    const dw = im.width * r,
-      dh = im.height * r;
-    x.fillStyle = "#fff";
+    const L = cropLayout(S, S, im.width, im.height, bean.imageOffsetX, bean.imageOffsetY, bean.imageZoom);
+    x.fillStyle = "#241c10";
     x.fillRect(ix, iy, S, S);
-    x.drawImage(im, ix + (S - dw) * ((bean.imageOffsetX ?? 50) / 100), iy + (S - dh) * ((bean.imageOffsetY ?? 50) / 100), dw, dh);
+    x.drawImage(im, ix + L.left, iy + L.top, L.w, L.h);
   } else {
     x.fillStyle = "#241c10";
     x.fillRect(ix, iy, S, S);
@@ -1359,7 +1464,7 @@ async function drawBrewCard(bean, method, dialed) {
     d = dialed || null;
   const cells = [];
   const grind = d?.grind || (bean.grindLogs?.[method]?.slice(-1)[0] ? grindLabel(bean.grindLogs[method].slice(-1)[0].position) : "");
-  if (method === "espresso") cells.push(["DOSE", md.dose + "g"], ["YIELD", md.yield + "g"], ["TIME", md.time + "s"], ["TEMP", md.temp + "°F"]);else if (method === "aeropress") cells.push(["DOSE", md.dose + "g"], ["WATER", md.water + "g"], ["TEMP", md.temp + "°F"], ["STEEP", md.steepTime + "s"]);else if (method === "pourover") cells.push(["DOSE", md.dose + "g"], ["WATER", md.water + "g"], ["TEMP", md.temp + "°F"], ["TIME", md.totalTime || "—"]);else cells.push(["DOSE", md.dose + "g"], ["WATER", md.water + "ml"], ["RATIO", ratioStr(md.dose, md.water)], ["TIME", md.totalTime || "—"]);
+  if (method === "espresso") cells.push(["DOSE", md.dose + "g"], ["YIELD", md.yield + "g"], ["TIME", md.time + "s"], ["TEMP", md.temp + "°F"]);else if (method === "aeropress") cells.push(["DOSE", md.dose + "g"], ["WATER", md.water + "g"], ["TEMP", md.temp + "°F"], ["STEEP", md.steepTime + "s"]);else if (method === "pourover") cells.push(["DOSE", md.dose + "g"], ["WATER", md.water + "g"], ["TEMP", md.temp + "°F"], ["TIME", md.totalTime || "—"]);else if (method === "switch") cells.push(["DOSE", md.dose + "g"], ["WATER", md.water + "g"], ["TEMP", md.temp + "°F"], ["STEEP", md.steepTime + "s"]);else cells.push(["DOSE", md.dose + "g"], ["WATER", md.water + "ml"], ["RATIO", ratioStr(md.dose, md.water)], ["TIME", md.totalTime || "—"]);
   if (grind) cells.push(["GRIND", grind]);
   const py = Math.max(y + 14, 880),
     ph = H - py - 130;
@@ -1544,8 +1649,12 @@ function StatsScreen({
     });
   }));
   const priced = beans.filter(b => num(b.price) && num(b.bagGrams));
-  const spend = priced.reduce((s, b) => s + num(b.price), 0),
-    grams = priced.reduce((s, b) => s + num(b.bagGrams), 0);
+  const oldBags = [];
+  beans.forEach(b => (b.bagHistory || []).forEach(h => {
+    if (num(h.price) && num(h.bagGrams)) oldBags.push(h);
+  }));
+  const spend = priced.reduce((s, b) => s + num(b.price), 0) + oldBags.reduce((s, h) => s + num(h.price), 0),
+    grams = priced.reduce((s, b) => s + num(b.bagGrams), 0) + oldBags.reduce((s, h) => s + num(h.bagGrams), 0);
   const perDoseList = priced.map(b => costInfo(b, b.methods?.espresso?.dose)).filter(c => c && c.perDose).map(c => c.perDose);
   const avgDose = perDoseList.length ? perDoseList.reduce((a, b) => a + b, 0) / perDoseList.length : null;
   const monthOf = e => {
@@ -1603,7 +1712,7 @@ function StatsScreen({
     style: {
       marginBottom: 4
     }
-  }, "Your Coffee Year"), React.createElement("div", {
+  }, "Overview"), React.createElement("div", {
     className: "sec-txt",
     style: {
       marginBottom: 14,
@@ -1834,7 +1943,7 @@ function tasteGaps(beans, awayLog) {
   };
 }
 function tasteContext(beans, awayLog, rs, gaps) {
-  const line = b => `${b.name} (${b.roaster || "?"}), ${b.origin || "?"}, ${b.process || "?"}, ${b.roast || "?"}, rated ${b.rating}/10${b.flavorProfile ? ", notes: " + b.flavorProfile : ""}`;
+  const line = b => `${b.name} (${b.roaster || "?"}), ${b.origin || "?"}, ${b.process || "?"}, ${b.roast || "?"}${b.decaf ? ", decaf" : ""}, rated ${b.rating}/10${b.flavorProfile ? ", notes: " + b.flavorProfile : ""}`;
   const loved = beans.filter(b => b.rating >= 8).sort((a, b) => b.rating - a.rating).map(line);
   const mid = beans.filter(b => b.rating > 5.5 && b.rating < 8).map(line);
   const disliked = beans.filter(b => b.rating > 0 && b.rating <= 5.5).map(line);
@@ -1846,7 +1955,7 @@ function tasteContext(beans, awayLog, rs, gaps) {
 async function callClaudeTools(system, user, tools, maxTokens) {
   const key = window._COFFEE_API_KEY;
   if (!key) return {
-    error: "No API key yet. Tap the gear icon to add your Anthropic API key.",
+    error: NO_KEY_MSG,
     code: "nokey"
   };
   const messages = [{
@@ -1865,7 +1974,7 @@ async function callClaudeTools(system, user, tools, maxTokens) {
           "anthropic-dangerous-direct-browser-access": "true"
         },
         body: JSON.stringify({
-          model: "claude-sonnet-4-6",
+          model: aiModel(),
           max_tokens: maxTokens || 3000,
           system,
           tools,
@@ -1874,12 +1983,8 @@ async function callClaudeTools(system, user, tools, maxTokens) {
       });
       if (!res.ok) {
         const t = await res.text();
-        let msg = t;
-        try {
-          msg = JSON.parse(t).error.message;
-        } catch (e) {}
         return {
-          error: String(msg).slice(0, 240),
+          error: apiErrText(res.status, t, true),
           code: "api",
           status: res.status
         };
@@ -1953,10 +2058,33 @@ function cleanPick(p) {
     inStock: p.inStock === false ? false : p.inStock === true ? true : null
   };
 }
-const zonesFor = m => m === "espresso" ? ESPRESSO_ZONES : m === "aeropress" ? AEROPRESS_ZONES : m === "moccamaster" ? MOCCA_ZONES : POUROVER_ZONES;
+const zonesFor = m => m === "espresso" ? ESPRESSO_ZONES : m === "aeropress" ? AEROPRESS_ZONES : m === "moccamaster" ? MOCCA_ZONES : m === "switch" ? SWITCH_ZONES : POUROVER_ZONES;
+const MODEL_KEY = "coffeeLog_model",
+  DEFAULT_MODEL = "claude-sonnet-4-6";
+const MODEL_OPTS = [["claude-sonnet-4-6", "Sonnet 4.6 (default)"], ["claude-sonnet-5-5", "Sonnet 5.5 (newer)"], ["claude-haiku-4-5-20251001", "Haiku 4.5 (faster and cheaper)"], ["claude-opus-5-5", "Opus 5.5 (most capable, costs more)"]];
+function aiModel() {
+  try {
+    return localStorage.getItem(MODEL_KEY) || DEFAULT_MODEL;
+  } catch (e) {
+    return DEFAULT_MODEL;
+  }
+}
+const NO_KEY_MSG = "No API key yet. Open the menu (the three dots), then Settings, and add your Anthropic API key.";
+function apiErrText(status, body, plain) {
+  let msg = body;
+  try {
+    msg = JSON.parse(body).error.message;
+  } catch (e) {}
+  msg = String(msg || "").slice(0, 220);
+  if (status === 404 || /model/i.test(msg) && /not.?found|does not exist|deprecated|retired|no longer/i.test(msg)) return "The AI model this app is set to use is not available (" + aiModel() + "). Open the menu, then Settings, and pick a different AI model.";
+  if (status === 401) return "Your API key was rejected. Open the menu, then Settings, and check the key.";
+  if (status === 429) return "The AI service is busy, or your account hit a limit. Wait a minute and try again.";
+  if (status >= 500) return "The AI service is having trouble right now. Try again in a minute.";
+  return plain ? msg : "API error " + status + ": " + msg;
+}
 async function callClaude(system, user, json) {
   const key = window._COFFEE_API_KEY;
-  if (!key) return json ? null : "⚠️ No API key. Tap ⚙ to add your Anthropic API key.";
+  if (!key) return json ? null : NO_KEY_MSG;
   try {
     const res = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
@@ -1967,7 +2095,7 @@ async function callClaude(system, user, json) {
         "anthropic-dangerous-direct-browser-access": "true"
       },
       body: JSON.stringify({
-        model: "claude-sonnet-4-6",
+        model: aiModel(),
         max_tokens: 1200,
         system,
         messages: [{
@@ -1978,7 +2106,7 @@ async function callClaude(system, user, json) {
     });
     if (!res.ok) {
       const t = await res.text();
-      return json ? null : "API error " + res.status + ": " + t.slice(0, 200);
+      return json ? null : apiErrText(res.status, t);
     }
     const d = await res.json();
     if (d.error) return json ? null : "API error: " + d.error.message;
@@ -2053,7 +2181,7 @@ const FETCH_ERRORS = {
 async function callClaudeFetchUrl(rawUrl) {
   const key = window._COFFEE_API_KEY;
   if (!key) return {
-    error: "No API key yet. Tap the gear icon to add your Anthropic API key.",
+    error: NO_KEY_MSG,
     code: "nokey"
   };
   let url = rawUrl.trim();
@@ -2075,7 +2203,7 @@ async function callClaudeFetchUrl(rawUrl) {
           "anthropic-dangerous-direct-browser-access": "true"
         },
         body: JSON.stringify({
-          model: "claude-sonnet-4-6",
+          model: aiModel(),
           max_tokens: 1500,
           system: "You read coffee roaster product pages and extract structured bean details. Fetch the given URL, then answer with the JSON object only.",
           tools: [{
@@ -2089,12 +2217,8 @@ async function callClaudeFetchUrl(rawUrl) {
       });
       if (!res.ok) {
         const t = await res.text();
-        let msg = t;
-        try {
-          msg = JSON.parse(t).error.message;
-        } catch (e) {}
         return {
-          error: "The page lookup was rejected (" + res.status + "): " + String(msg).slice(0, 180),
+          error: (res.status === 400 ? "The page lookup was rejected: " : "") + apiErrText(res.status, t, true),
           code: "api"
         };
       }
@@ -2141,7 +2265,7 @@ async function callClaudeFetchUrl(rawUrl) {
 }
 async function callClaudeVision(system, userText, imageDataUrl, json) {
   const key = window._COFFEE_API_KEY;
-  if (!key) return json ? null : "⚠️ No API key. Tap ⚙ to add your Anthropic API key.";
+  if (!key) return json ? null : NO_KEY_MSG;
   try {
     const match = imageDataUrl.match(/^data:(image\/[a-zA-Z]+);base64,(.+)$/);
     if (!match) return json ? null : "Invalid image data.";
@@ -2156,7 +2280,7 @@ async function callClaudeVision(system, userText, imageDataUrl, json) {
         "anthropic-dangerous-direct-browser-access": "true"
       },
       body: JSON.stringify({
-        model: "claude-sonnet-4-6",
+        model: aiModel(),
         max_tokens: 1200,
         system,
         messages: [{
@@ -2177,7 +2301,7 @@ async function callClaudeVision(system, userText, imageDataUrl, json) {
     });
     if (!res.ok) {
       const t = await res.text();
-      return json ? null : "API error " + res.status + ": " + t.slice(0, 200);
+      return json ? null : apiErrText(res.status, t);
     }
     const d = await res.json();
     if (d.error) return json ? null : "API error: " + d.error.message;
@@ -2196,15 +2320,23 @@ async function callClaudeVision(system, userText, imageDataUrl, json) {
     return json ? null : "Error: " + m;
   }
 }
-const SYSTEM = `You are an expert specialty coffee consultant. Equipment: La Marzocco Linea Micra (dual boiler), Mahlkonig X64 SD single dose grinder (0-1 range for espresso, full 0-12 for manual methods, 5 dots between each number on the dial), Hario V60 with METAL mesh filter (no paper), AeroPress with PAPER filter (not metal), standard AeroPress (max 220g water capacity), Technivorm Moccamaster KBT (full size, 1.25L, stainless thermal carafe with no hot plate, #4 cone paper filter, fixed brew temp around 196-205F, no small-batch switch, recommended 60g/L), temperature-controlled kettle, RO water with Third Wave espresso minerals.
-CRITICAL RULES: Shot SLOW >35s = NEVER finer grind. Shot FAST <22s = NEVER coarser. Sour+slow = channeling, fix puck prep first. Bitter+fast = over-extraction, coarser grind. AeroPress uses paper filter — grind accordingly. V60 uses metal filter — grind coarser than paper equivalent. AeroPress max 220g water. 3-5 bullets max. No fluff.`;
+const SYS_BASE = "You are an expert specialty coffee consultant. Grinder: Mahlkonig X64 SD single dose (0-1 range for espresso, full 0-12 for other methods, 5 dots between each number on the dial). Water: RO water with Third Wave minerals.";
+const SYS_GEAR = {
+  espresso: "Brewer for this question: La Marzocco Linea Micra (dual boiler) espresso machine.\nCRITICAL RULES: Shot SLOW >35s = NEVER finer grind. Shot FAST <22s = NEVER coarser. Sour+slow = channeling, fix puck prep first. Bitter+fast = over-extraction, coarser grind.",
+  aeropress: "Brewer for this question: standard AeroPress with a PAPER filter (not metal), max 220g water capacity, temperature-controlled kettle.\nCRITICAL RULES: Never exceed 220g water. Grind for a paper filter.",
+  pourover: "Brewer for this question: Hario V60 with a METAL mesh filter (no paper), temperature-controlled kettle.\nCRITICAL RULES: Grind coarser than a paper-filter equivalent.",
+  switch: "Brewer for this question: Hario Switch (glass V60 02 cone on a base with a shut-off valve), brewed as steep and release with a PAPER V60 filter, temperature-controlled kettle.\nCRITICAL RULES: The filter is paper. Give a steep time with the switch closed, then an expected drawdown after opening it. A typical recipe is switch closed, all the water in, steep about 2 minutes, open, drain in under a minute.",
+  moccamaster: "Brewer for this question: Technivorm Moccamaster KBT (full size, 1.25L, stainless thermal carafe with no hot plate, no small-batch switch). It brews through a #4 cone PAPER filter in the machine's plastic brew basket. Brew temp is fixed by the machine at around 196-205F. Recommended ratio 60g/L.\nCRITICAL RULES: The filter is paper. There is no metal filter and no metal basket. Do not specify temperature. Max 1250ml water."
+};
+const systemFor = m => SYS_BASE + " " + (SYS_GEAR[m] || SYS_GEAR.espresso) + "\nAnswer only for this brewer. Do not mention the person's other brewers, other filters, or rules that belong to other methods. 3-5 bullets max. No fluff.";
 function Field({
   label,
   value,
   onChange,
   multiline,
   placeholder,
-  inputMode
+  inputMode,
+  type
 }) {
   return multiline ? React.createElement("div", {
     className: "field"
@@ -2216,6 +2348,7 @@ function Field({
   })) : React.createElement("div", {
     className: "field"
   }, React.createElement("label", null, label), React.createElement("input", {
+    type: type || "text",
     value: value,
     inputMode: inputMode,
     onChange: e => onChange(e.target.value),
@@ -2240,6 +2373,11 @@ function Sel({
   onChange,
   options
 }) {
+  const known = options.some(o => String(o.value || o) === String(value));
+  if (!known && value !== undefined && value !== null && value !== "") options = [{
+    value: String(value),
+    label: String(value)
+  }, ...options];
   return React.createElement("div", {
     className: "field"
   }, React.createElement("label", null, label), React.createElement("select", {
@@ -2251,6 +2389,86 @@ function Sel({
     value: o.value || o
   }, o.label || o))));
 }
+function cropLayout(fw, fh, iw, ih, x, y, zoom) {
+  const cover = Math.max(fw / iw, fh / ih),
+    contain = Math.min(fw / iw, fh / ih);
+  const sc = Math.max(contain, cover * ((zoom || 100) / 100));
+  const w = iw * sc,
+    h = ih * sc;
+  const pos = (f, frame, size) => size <= frame + 0.5 ? (frame - size) / 2 : Math.min(0, Math.max(frame - size, frame / 2 - f * size));
+  return {
+    w,
+    h,
+    left: pos((x ?? 50) / 100, fw, w),
+    top: pos((y ?? 50) / 100, fh, h),
+    min: contain / cover * 100
+  };
+}
+function BeanImg({
+  src,
+  x,
+  y,
+  zoom,
+  className,
+  style,
+  alt
+}) {
+  const ref = useRef(null);
+  const [natS, setNat] = useState(null);
+  const [fs, setFs] = useState(null);
+  const [badS, setBad] = useState(null);
+  const nat = natS && natS.src === src ? natS : null,
+    bad = badS === src;
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const m = () => {
+      const w = el.clientWidth,
+        h = el.clientHeight;
+      if (w && h) setFs(f => f && f.w === w && f.h === h ? f : {
+        w,
+        h
+      });
+    };
+    m();
+    if (window.ResizeObserver) {
+      const ro = new ResizeObserver(m);
+      ro.observe(el);
+      return () => ro.disconnect();
+    }
+    window.addEventListener("resize", m);
+    return () => window.removeEventListener("resize", m);
+  }, []);
+  const L = nat && fs ? cropLayout(fs.w, fs.h, nat.w, nat.h, x, y, zoom) : null;
+  return React.createElement("div", {
+    ref: ref,
+    className: "bimg" + (className ? " " + className : ""),
+    style: style
+  }, !bad && React.createElement("img", {
+    src: src,
+    alt: alt || "",
+    draggable: false,
+    onLoad: e => setNat({
+      src,
+      w: e.target.naturalWidth || 1,
+      h: e.target.naturalHeight || 1
+    }),
+    onError: () => setBad(src),
+    style: L ? {
+      left: L.left,
+      top: L.top,
+      width: L.w,
+      height: L.h
+    } : {
+      left: 0,
+      top: 0,
+      width: "100%",
+      height: "100%",
+      opacity: 0
+    }
+  }));
+}
+const CROP_MAX_ZOOM = 600;
 function ImageCropBox({
   src,
   posX,
@@ -2258,38 +2476,103 @@ function ImageCropBox({
   zoom,
   onChange
 }) {
-  const frameRef = useRef(null);
-  const dragRef = useRef(null);
-  const px = posX ?? 50,
-    py = posY ?? 50,
+  const frameRef = useRef(null),
+    g = useRef(null);
+  const [nat, setNat] = useState(null);
+  const [fs, setFs] = useState(null);
+  const x = posX ?? 50,
+    y = posY ?? 50,
     z = zoom ?? 100;
-  const clampAndSet = (nx, ny, nz) => {
-    const cx = Math.max(0, Math.min(100, nx));
-    const cy = Math.max(0, Math.min(100, ny));
-    const cz = Math.max(100, Math.min(300, nz));
+  useEffect(() => {
+    let dead = false;
+    setNat(null);
+    const im = new Image();
+    im.onload = () => {
+      if (!dead) setNat({
+        w: im.naturalWidth || 1,
+        h: im.naturalHeight || 1
+      });
+    };
+    im.src = src;
+    return () => {
+      dead = true;
+    };
+  }, [src]);
+  useEffect(() => {
+    const m = () => {
+      const r = frameRef.current && frameRef.current.getBoundingClientRect();
+      if (r && r.width) setFs({
+        w: r.width,
+        h: r.height
+      });
+    };
+    m();
+    window.addEventListener("resize", m);
+    return () => window.removeEventListener("resize", m);
+  }, []);
+  const L = nat && fs ? cropLayout(fs.w, fs.h, nat.w, nat.h, x, y, z) : null;
+  const minZ = L ? Math.max(5, Math.floor(L.min)) : 20;
+  const zShown = Math.max(minZ, Math.min(CROP_MAX_ZOOM, z));
+  const eff = () => L ? {
+    x: L.w > fs.w ? (fs.w / 2 - L.left) / L.w * 100 : x,
+    y: L.h > fs.h ? (fs.h / 2 - L.top) / L.h * 100 : y
+  } : {
+    x,
+    y
+  };
+  const send = (nx, ny, nz) => {
+    const zz = Math.max(minZ, Math.min(CROP_MAX_ZOOM, nz));
+    let cx = Math.max(0, Math.min(100, nx)),
+      cy = Math.max(0, Math.min(100, ny));
+    if (nat && fs) {
+      const l = cropLayout(fs.w, fs.h, nat.w, nat.h, cx, cy, zz);
+      if (l.w > fs.w) {
+        const hx = fs.w / 2 / l.w * 100;
+        cx = Math.max(hx, Math.min(100 - hx, cx));
+      }
+      if (l.h > fs.h) {
+        const hy = fs.h / 2 / l.h * 100;
+        cy = Math.max(hy, Math.min(100 - hy, cy));
+      }
+    }
     onChange({
       posX: cx,
       posY: cy,
-      zoom: cz
+      zoom: Math.round(zz)
     });
   };
-  const startDrag = (clientX, clientY) => {
-    dragRef.current = {
-      startX: clientX,
-      startY: clientY,
-      origX: px,
-      origY: py
+  const dist = t => Math.hypot(t[0].clientX - t[1].clientX, t[0].clientY - t[1].clientY);
+  const start = pts => {
+    const e = eff();
+    g.current = pts.length >= 2 ? {
+      mode: "pinch",
+      d0: dist(pts),
+      z0: zShown,
+      ox: e.x,
+      oy: e.y
+    } : {
+      mode: "pan",
+      sx: pts[0].clientX,
+      sy: pts[0].clientY,
+      ox: e.x,
+      oy: e.y
     };
   };
-  const moveDrag = (clientX, clientY) => {
-    if (!dragRef.current || !frameRef.current) return;
-    const rect = frameRef.current.getBoundingClientRect();
-    const dxPct = (clientX - dragRef.current.startX) / rect.width * 100;
-    const dyPct = (clientY - dragRef.current.startY) / rect.height * 100;
-    clampAndSet(dragRef.current.origX - dxPct, dragRef.current.origY - dyPct, z);
+  const move = pts => {
+    const s = g.current;
+    if (!s || !L) return;
+    if (s.mode === "pinch" && pts.length >= 2) {
+      send(s.ox, s.oy, s.z0 * dist(pts) / Math.max(1, s.d0));
+      return;
+    }
+    if (s.mode === "pan" && pts.length === 1) send(s.ox - (pts[0].clientX - s.sx) / L.w * 100, s.oy - (pts[0].clientY - s.sy) / L.h * 100, zShown);
   };
-  const endDrag = () => {
-    dragRef.current = null;
+  const end = pts => {
+    if (pts && pts.length) start(pts);else g.current = null;
+  };
+  const zoomBy = f => {
+    const e = eff();
+    send(e.x, e.y, zShown * f);
   };
   return React.createElement("div", {
     className: "crop-box-wrap"
@@ -2298,50 +2581,79 @@ function ImageCropBox({
     className: "crop-box-frame",
     onMouseDown: e => {
       e.preventDefault();
-      startDrag(e.clientX, e.clientY);
+      start([e]);
     },
-    onMouseMove: e => moveDrag(e.clientX, e.clientY),
-    onMouseUp: endDrag,
-    onMouseLeave: endDrag,
-    onTouchStart: e => {
-      const t = e.touches[0];
-      startDrag(t.clientX, t.clientY);
+    onMouseMove: e => {
+      if (g.current) move([e]);
     },
-    onTouchMove: e => {
-      const t = e.touches[0];
-      moveDrag(t.clientX, t.clientY);
-    },
-    onTouchEnd: endDrag,
-    onWheel: e => {
-      e.preventDefault();
-      clampAndSet(px, py, z + (e.deltaY < 0 ? 8 : -8));
-    }
+    onMouseUp: () => end(),
+    onMouseLeave: () => end(),
+    onTouchStart: e => start([...e.touches]),
+    onTouchMove: e => move([...e.touches]),
+    onTouchEnd: e => end([...e.touches]),
+    onTouchCancel: () => end(),
+    onWheel: e => zoomBy(e.deltaY < 0 ? 1.08 : 1 / 1.08)
   }, React.createElement("img", {
     src: src,
     alt: "Crop preview",
     draggable: false,
-    style: {
-      objectPosition: `${px}% ${py}%`,
-      transform: `scale(${z / 100})`
+    style: L ? {
+      left: L.left,
+      top: L.top,
+      width: L.w,
+      height: L.h
+    } : {
+      left: 0,
+      top: 0,
+      width: "100%",
+      height: "100%",
+      opacity: 0
     },
     onError: ev => ev.target.style.opacity = 0.15
   }), React.createElement("div", {
     className: "crop-box-hint"
-  }, "Drag to reposition")), React.createElement("div", {
+  }, "Drag to move · pinch to zoom")), React.createElement("div", {
     className: "crop-box-zoom-row"
-  }, React.createElement("span", {
-    className: "crop-box-zoom-lbl"
-  }, "Zoom"), React.createElement("input", {
+  }, React.createElement("button", {
+    type: "button",
+    className: "btn sm crop-step",
+    "aria-label": "Zoom out",
+    onClick: () => zoomBy(1 / 1.25)
+  }, "−"), React.createElement("input", {
     type: "range",
-    min: "100",
-    max: "300",
-    value: z,
-    onChange: e => clampAndSet(px, py, parseInt(e.target.value)),
+    min: minZ,
+    max: CROP_MAX_ZOOM,
+    step: "1",
+    value: zShown,
+    onChange: e => {
+      const ef = eff();
+      send(ef.x, ef.y, parseInt(e.target.value));
+    },
     className: "img-adjust-slider"
   }), React.createElement("button", {
+    type: "button",
+    className: "btn sm crop-step",
+    "aria-label": "Zoom in",
+    onClick: () => zoomBy(1.25)
+  }, "+")), React.createElement("div", {
+    className: "crop-box-btns"
+  }, React.createElement("button", {
+    type: "button",
     className: "btn sm",
-    onClick: () => clampAndSet(50, 50, 100)
-  }, "Reset")));
+    onClick: () => send(50, 50, minZ)
+  }, "Fit whole photo"), React.createElement("button", {
+    type: "button",
+    className: "btn sm",
+    onClick: () => send(50, 50, 100)
+  }, "Fill frame"), React.createElement("div", {
+    className: "crop-thumb"
+  }, React.createElement(BeanImg, {
+    src: src,
+    x: x,
+    y: y,
+    zoom: z,
+    className: "bc-img"
+  }), React.createElement("span", null, "In your list"))));
 }
 function GrindSelector({
   value,
@@ -2497,7 +2809,8 @@ function TimerModal({
   const ref = useRef(null);
   const audioRef = useRef(null),
     lockRef = useRef(null),
-    runRef = useRef(false);
+    runRef = useRef(false),
+    startRef = useRef(0);
   const [sound, setSound] = useState(() => {
     try {
       return localStorage.getItem("coffeeLog_timersound") !== "off";
@@ -2585,24 +2898,22 @@ function TimerModal({
   const remaining = Math.max(0, total - elapsed);
   useEffect(() => {
     if (running && !done) {
+      startRef.current = Date.now() - elapsed * 1000;
       ref.current = setInterval(() => {
-        setElapsed(e => {
-          const n = e + 1;
-          if (n >= total) {
-            clearInterval(ref.current);
-            if (idx < stages.length - 1) setTimeout(() => {
-              setIdx(i => i + 1);
-              setElapsed(0);
-              setRunning(true);
-            }, 600);else {
-              setDone(true);
-              setRunning(false);
-            }
-            return total;
+        const n = Math.min(total, Math.floor((Date.now() - startRef.current) / 1000));
+        setElapsed(n);
+        if (n >= total) {
+          clearInterval(ref.current);
+          if (idx < stages.length - 1) setTimeout(() => {
+            setIdx(i => i + 1);
+            setElapsed(0);
+            setRunning(true);
+          }, 600);else {
+            setDone(true);
+            setRunning(false);
           }
-          return n;
-        });
-      }, 1000);
+        }
+      }, 250);
     }
     return () => clearInterval(ref.current);
   }, [running, idx, total, done]);
@@ -2980,6 +3291,97 @@ const POUROVER_ZONES = [{
   color: "#8a9878",
   fix: "Grind coarser — bed is too fine and choking the flow."
 }];
+const SWITCH_ZONES = [{
+  id: "channeled_harsh",
+  n: 1,
+  x: 22,
+  y: 18,
+  label: "Harsh / Uneven",
+  desc: "Harsh, some sour and bitter together",
+  color: "#c8b840",
+  fix: "Stir gently once after pouring so all the grounds are wet, and let the bed settle flat before you open the switch."
+}, {
+  id: "bitter_heavy",
+  n: 2,
+  x: 36,
+  y: 30,
+  label: "Bitter & Heavy",
+  desc: "Heavy, bitter, over-extracted",
+  color: "#c8a050",
+  fix: "Shorten the steep by 20 to 30 seconds, or grind coarser."
+}, {
+  id: "rich_full",
+  n: 3,
+  x: 48,
+  y: 42,
+  label: "Rich & Full",
+  desc: "Full body, good sweetness, slightly heavy",
+  color: "#a8c060",
+  fix: "A slightly coarser grind or a shorter steep gives more clarity."
+}, {
+  id: "sweet_spot",
+  n: 4,
+  x: 58,
+  y: 48,
+  label: "Sweet Spot ✓",
+  desc: "Balanced, clean, sweet, expressive",
+  color: "#70b870",
+  fix: "Dialed in. Note this recipe."
+}, {
+  id: "bright_clean",
+  n: 5,
+  x: 68,
+  y: 38,
+  label: "Bright & Clean",
+  desc: "Bright, clean, delicate florals/fruit",
+  color: "#78b878",
+  fix: "Great as-is, or steep 15 seconds longer for more body."
+}, {
+  id: "weak_thin",
+  n: 6,
+  x: 28,
+  y: 60,
+  label: "Weak & Thin",
+  desc: "Thin body, underdeveloped flavor",
+  color: "#b8a840",
+  fix: "Grind finer, steep longer, or raise the dose."
+}, {
+  id: "sour_fast",
+  n: 7,
+  x: 18,
+  y: 74,
+  label: "Sour",
+  desc: "Sour, sharp, underextracted",
+  color: "#c89040",
+  fix: "Grind finer and steep 30 seconds longer. Use hotter water for light roasts."
+}, {
+  id: "flat_dull",
+  n: 8,
+  x: 44,
+  y: 76,
+  label: "Flat / Dull",
+  desc: "Muted, little aroma or brightness",
+  color: "#9a9070",
+  fix: "Use hotter water and preheat the glass cone. Check the beans are fresh."
+}, {
+  id: "astringent_dry",
+  n: 9,
+  x: 72,
+  y: 66,
+  label: "Astringent",
+  desc: "Drying, tannic, papery aftertaste",
+  color: "#a87850",
+  fix: "Rinse the paper filter, do not stir late in the steep, and stop before the last drips."
+}, {
+  id: "stalled_bitter",
+  n: 10,
+  x: 60,
+  y: 82,
+  label: "Slow Drain / Bitter",
+  desc: "Drawdown drags on, bitter cup",
+  color: "#8a9878",
+  fix: "Grind coarser. Fines are clogging the paper and the drawdown is too slow."
+}];
 const MOCCA_ZONES = [{
   id: "channeled_uneven",
   n: 1,
@@ -3071,156 +3473,6 @@ const MOCCA_ZONES = [{
   color: "#8a9878",
   fix: "Grind coarser. Fines are clogging the filter and causing the basket to back up."
 }];
-function Compass({
-  onSelect,
-  selected,
-  zones,
-  title,
-  subtitle,
-  axisTop,
-  axisBottom
-}) {
-  const shape = "25,8 95,8 75,92 5,92";
-  return React.createElement("div", {
-    className: "compass-wrap"
-  }, React.createElement("div", {
-    className: "compass-title"
-  }, title || "Espresso Compass"), React.createElement("div", {
-    className: "compass-sub"
-  }, subtitle || "Tap a numbered zone that matches your shot"), React.createElement("div", {
-    className: "compass-axis"
-  }, React.createElement("span", null, axisTop && axisTop[0] || "Under-extracted"), React.createElement("span", null, axisTop && axisTop[1] || "Balanced"), React.createElement("span", null, axisTop && axisTop[2] || "Over-extracted")), React.createElement("div", {
-    style: {
-      position: "relative",
-      margin: "4px 0"
-    }
-  }, React.createElement("svg", {
-    viewBox: "0 0 100 100",
-    style: {
-      width: "100%",
-      height: "auto",
-      display: "block"
-    }
-  }, React.createElement("defs", null, React.createElement("clipPath", {
-    id: "cc"
-  }, React.createElement("polygon", {
-    points: shape
-  })), React.createElement("linearGradient", {
-    id: "cg",
-    x1: "0%",
-    y1: "0%",
-    x2: "100%",
-    y2: "100%"
-  }, React.createElement("stop", {
-    offset: "0%",
-    stopColor: "#c8c040",
-    stopOpacity: "0.45"
-  }), React.createElement("stop", {
-    offset: "45%",
-    stopColor: "#70b870",
-    stopOpacity: "0.55"
-  }), React.createElement("stop", {
-    offset: "100%",
-    stopColor: "#c86040",
-    stopOpacity: "0.45"
-  }))), React.createElement("polygon", {
-    points: shape,
-    fill: "url(#cg)"
-  }), React.createElement("polygon", {
-    points: shape,
-    fill: "none",
-    stroke: "#5a4a30",
-    strokeWidth: "0.8"
-  }), React.createElement("line", {
-    x1: "33",
-    y1: "8",
-    x2: "13",
-    y2: "92",
-    stroke: "#3a2e22",
-    strokeWidth: "0.4",
-    clipPath: "url(#cc)"
-  }), React.createElement("line", {
-    x1: "63",
-    y1: "8",
-    x2: "43",
-    y2: "92",
-    stroke: "#3a2e22",
-    strokeWidth: "0.4",
-    clipPath: "url(#cc)"
-  }), React.createElement("line", {
-    x1: "25",
-    y1: "36",
-    x2: "95",
-    y2: "36",
-    stroke: "#3a2e22",
-    strokeWidth: "0.4",
-    clipPath: "url(#cc)"
-  }), React.createElement("line", {
-    x1: "15",
-    y1: "64",
-    x2: "85",
-    y2: "64",
-    stroke: "#3a2e22",
-    strokeWidth: "0.4",
-    clipPath: "url(#cc)"
-  }), zones.map(z => React.createElement("g", {
-    key: z.id,
-    onClick: () => onSelect(selected?.id === z.id ? null : z),
-    style: {
-      cursor: "pointer"
-    }
-  }, React.createElement("circle", {
-    cx: z.x,
-    cy: z.y,
-    r: selected?.id === z.id ? 6 : 4.6,
-    fill: z.color,
-    opacity: selected?.id === z.id ? 1 : 0.8,
-    stroke: selected?.id === z.id ? "#fff" : "rgba(0,0,0,0.35)",
-    strokeWidth: selected?.id === z.id ? 1.3 : 0.5,
-    style: {
-      transition: "all 0.15s"
-    }
-  }), React.createElement("text", {
-    x: z.x,
-    y: z.y,
-    textAnchor: "middle",
-    dominantBaseline: "central",
-    fontSize: selected?.id === z.id ? 5 : 4,
-    fontWeight: "700",
-    fill: "#1a1410",
-    style: {
-      pointerEvents: "none"
-    }
-  }, z.n))))), React.createElement("div", {
-    className: "compass-axis"
-  }, React.createElement("span", null, axisBottom && axisBottom[0] || "Strong"), React.createElement("span", null), React.createElement("span", null, axisBottom && axisBottom[1] || "Weak")), React.createElement("div", {
-    className: "compass-legend"
-  }, zones.map(z => React.createElement("button", {
-    key: z.id,
-    className: "compass-legend-item" + (selected?.id === z.id ? " sel" : ""),
-    onClick: () => onSelect(selected?.id === z.id ? null : z)
-  }, React.createElement("span", {
-    className: "compass-legend-dot",
-    style: {
-      background: z.color
-    }
-  }, z.n), z.label))), selected && React.createElement("div", {
-    className: "compass-result"
-  }, React.createElement("div", {
-    className: "compass-result-label",
-    style: {
-      color: selected.color
-    }
-  }, selected.label), React.createElement("div", {
-    className: "compass-result-desc"
-  }, selected.desc), React.createElement("div", {
-    className: "compass-result-fix"
-  }, React.createElement("span", {
-    style: {
-      color: "var(--gold)"
-    }
-  }, "Action: "), selected.fix)));
-}
 function BeanInfoSheet({
   bean
 }) {
@@ -3388,12 +3640,12 @@ function EditForm({
     value: o
   }, o)))), React.createElement(Field, {
     label: "Roast Date",
-    value: draft.roastDate || "",
+    type: "date",
+    value: toISODate(draft.roastDate),
     onChange: v => setDraft(d => ({
       ...d,
       roastDate: v
-    })),
-    placeholder: "YYYY-MM-DD"
+    }))
   }), React.createElement(Field, {
     label: "Altitude",
     value: draft.altitude || "",
@@ -3422,7 +3674,14 @@ function EditForm({
       flavorProfile: v
     })),
     placeholder: "e.g. Blueberry, chocolate"
-  })), React.createElement("div", {
+  })), React.createElement(Toggle, {
+    label: "Decaf?",
+    value: draft.decaf !== undefined ? !!draft.decaf : /\bdecaf/i.test(draft.name || ""),
+    onChange: v => setDraft(d => ({
+      ...d,
+      decaf: v
+    }))
+  }), React.createElement("div", {
     className: "field full"
   }, React.createElement("div", {
     className: "sec-lbl",
@@ -3688,6 +3947,54 @@ function EditForm({
     value: m.whatDidnt,
     onChange: u("whatDidnt"),
     multiline: true
+  }))), method === "switch" && React.createElement("div", {
+    className: "fg"
+  }, React.createElement(Sel, {
+    label: "Dose",
+    value: m.dose,
+    onChange: u("dose"),
+    options: DOSES_MAN
+  }), React.createElement(Sel, {
+    label: "Water",
+    value: m.water,
+    onChange: u("water"),
+    options: WATER_SWITCH
+  }), React.createElement(Sel, {
+    label: "Temp",
+    value: m.temp,
+    onChange: u("temp"),
+    options: TEMPS
+  }), React.createElement(Sel, {
+    label: "Steep (closed)",
+    value: m.steepTime,
+    onChange: u("steepTime"),
+    options: STEEP_OPTS
+  }), React.createElement(Field, {
+    label: "Total Time",
+    value: m.totalTime,
+    onChange: u("totalTime"),
+    placeholder: "e.g. 3:00"
+  }), React.createElement("div", {
+    className: "field full"
+  }, React.createElement(Field, {
+    label: "Tasting Notes",
+    value: m.notes,
+    onChange: u("notes"),
+    multiline: true
+  })), React.createElement("div", {
+    className: "field full"
+  }, React.createElement(Field, {
+    label: "What Worked",
+    value: m.whatWorked,
+    onChange: u("whatWorked"),
+    multiline: true
+  })), React.createElement("div", {
+    className: "field full"
+  }, React.createElement(Field, {
+    label: "What Didn't",
+    value: m.whatDidnt,
+    onChange: u("whatDidnt"),
+    multiline: true
   }))), method === "moccamaster" && React.createElement("div", {
     className: "fg"
   }, React.createElement(Sel, {
@@ -3777,6 +4084,33 @@ function App() {
   const [copied, setCopied] = useState(false);
   const [saveFailed, setSaveFailed] = useState(false);
   const [resumed, setResumed] = useState(false);
+  const [awayResumed, setAwayResumed] = useState(false);
+  const [confirmDel, setConfirmDel] = useState(null);
+  const [q, setQ] = useState("");
+  const [apiTest, setApiTest] = useState("");
+  const [modelSel, setModelSel] = useState(aiModel);
+  const [photosReady, setPhotosReady] = useState(false);
+  const [bagDlg, setBagDlg] = useState(null);
+  const [hiddenMethods, setHiddenMethods] = useState(() => {
+    try {
+      const v = JSON.parse(localStorage.getItem(HIDDEN_KEY) || "[]");
+      return Array.isArray(v) ? v.filter(m => METHODS.includes(m)) : [];
+    } catch (e) {
+      return [];
+    }
+  });
+  const shownMethods = METHODS.filter(m => !hiddenMethods.includes(m));
+  const toggleMethod = m => setHiddenMethods(h => {
+    const n = h.includes(m) ? h.filter(x => x !== m) : [...h, m];
+    if (n.length >= METHODS.length) return h;
+    try {
+      localStorage.setItem(HIDDEN_KEY, JSON.stringify(n));
+    } catch (e) {}
+    return n;
+  });
+  useEffect(() => {
+    if (shownMethods.length && !shownMethods.includes(method)) setMethod(shownMethods[0]);
+  }, [hiddenMethods, method]);
   const [aiLoading, setAiLoading] = useState(false);
   const [aiResults, setAiResults] = useState({});
   const [diagInput, setDiagInput] = useState("");
@@ -3894,8 +4228,36 @@ function App() {
         } else localStorage.removeItem(DRAFT_KEY);
       }
     } catch (e) {}
+    try {
+      const ar = localStorage.getItem(AWAYDRAFT_KEY);
+      if (ar) {
+        const a = JSON.parse(ar);
+        if (a && a.draft && Date.now() - (a.at || 0) < 3 * 864e5) {
+          setAwayDraft(d => ({
+            ...d,
+            ...a.draft
+          }));
+          setAddingAway(true);
+          setAwayResumed(true);
+          if (!localStorage.getItem(DRAFT_KEY)) setScreen("away");
+        } else localStorage.removeItem(AWAYDRAFT_KEY);
+      }
+    } catch (e) {}
     draftReady.current = true;
   }, []);
+  useEffect(() => {
+    if (!draftReady.current) return;
+    try {
+      const has = addingAway && Object.entries(awayDraft).some(([k, v]) => k === "rating" ? v > 0 : String(v || "").trim());
+      if (has) localStorage.setItem(AWAYDRAFT_KEY, JSON.stringify({
+        draft: awayDraft,
+        at: Date.now()
+      }));else {
+        localStorage.removeItem(AWAYDRAFT_KEY);
+        if (!addingAway && awayResumed) setAwayResumed(false);
+      }
+    } catch (e) {}
+  }, [addingAway, awayDraft]);
   useEffect(() => {
     if (!draftReady.current) return;
     try {
@@ -3919,7 +4281,37 @@ function App() {
   useEffect(() => {
     let dead = false;
     (async () => {
-      const big = beans.filter(b => b.imageBase64 && b.imageBase64.length > 180000);
+      let photos = {},
+        ok = true;
+      try {
+        photos = await idbAllPhotos();
+      } catch (e) {
+        ok = false;
+      }
+      Object.entries(photos).forEach(([k, v]) => {
+        PHOTO_SYNCED[k] = v;
+      });
+      PHOTOS_HYDRATED = ok;
+      if (dead) return;
+      if (Object.keys(photos).length) setBeans(bs => bs.map(b => {
+        const v = photos[photoKey(b)];
+        return v && !b.imageBase64 && !b.imageUrl ? {
+          ...b,
+          imageBase64: v
+        } : b;
+      }));
+      setPhotosReady(true);
+    })();
+    return () => {
+      dead = true;
+    };
+  }, []);
+  useEffect(() => {
+    if (!photosReady) return;
+    let dead = false;
+    saveBeans(beans);
+    (async () => {
+      const big = beans.filter(b => b.imageBase64 && b.imageBase64.length > 700000);
       if (!big.length) return;
       const out = {};
       for (const b of big) {
@@ -3934,7 +4326,7 @@ function App() {
     return () => {
       dead = true;
     };
-  }, []);
+  }, [photosReady]);
   useEffect(() => {
     try {
       if (navigator.storage && navigator.storage.persist) navigator.storage.persist();
@@ -3964,6 +4356,7 @@ function App() {
     return next;
   });
   const selectBean = id => {
+    setConfirmDel(null);
     setSelId(id);
     setShowList(false);
     setEditing(false);
@@ -4003,20 +4396,9 @@ function App() {
       rating: 0,
       inStock: true,
       currentlyBrewing: false,
-      methods: {
-        espresso: {
-          ...DEF.espresso
-        },
-        aeropress: {
-          ...DEF.aeropress
-        },
-        pourover: {
-          ...DEF.pourover
-        },
-        moccamaster: {
-          ...DEF.moccamaster
-        }
-      }
+      methods: perMethod(m => ({
+        ...DEF[m]
+      }))
     });
     setAdding(true);
     setEditing(false);
@@ -4026,37 +4408,16 @@ function App() {
     setPhotoImport(null);
     setCapturedPhoto(null);
   };
+  const isDecafDraft = d => d.decaf !== undefined ? !!d.decaf : /\bdecaf/i.test(d.name || "");
   const saveNew = () => {
     if (!draft.name) return;
     const id = Date.now();
-    upd(bs => [...bs, {
+    upd(bs => [...bs, migrate({
       ...draft,
+      decaf: isDecafDraft(draft),
       roaster: snapRoaster(draft.roaster, rGroups),
-      id,
-      grindLogs: {
-        espresso: [],
-        aeropress: [],
-        pourover: [],
-        moccamaster: []
-      },
-      savedRecipes: {
-        aeropress: [],
-        pourover: [],
-        moccamaster: []
-      },
-      shots: {
-        espresso: [],
-        aeropress: [],
-        pourover: [],
-        moccamaster: []
-      },
-      dialed: {
-        espresso: null,
-        aeropress: null,
-        pourover: null,
-        moccamaster: null
-      }
-    }]);
+      id
+    })]);
     setSelId(id);
     setAdding(false);
     setShowList(false);
@@ -4076,11 +4437,11 @@ function App() {
   };
   const saveEdit = () => {
     const g = roasterGroups([...beans.filter(b => b.id !== selId).map(b => b.roaster), ...awayLog.map(a => a.roaster)]);
-    upd(bs => bs.map(b => b.id === selId ? {
+    upd(bs => bs.map(b => b.id === selId ? migrate({
       ...b,
       ...draft,
       roaster: snapRoaster(draft.roaster, g)
-    } : b));
+    }) : b));
     setEditing(false);
   };
   const updDraftM = (f, v) => setDraft(d => ({
@@ -4133,6 +4494,33 @@ function App() {
   const updB = (f, v) => upd(bs => bs.map(b => b.id === selId ? {
     ...b,
     [f]: v
+  } : b));
+  const saveNewBag = () => {
+    const d = bagDlg;
+    upd(bs => bs.map(b => b.id === selId ? {
+      ...b,
+      bagHistory: [...(b.bagHistory || []), {
+        id: Date.now(),
+        roastDate: b.roastDate || "",
+        frozenOn: b.frozenOn || "",
+        thawedOn: b.thawedOn || "",
+        price: b.price || "",
+        bagGrams: b.bagGrams || "",
+        endedOn: todayISO()
+      }],
+      roastDate: d.roastDate || "",
+      frozenOn: "",
+      thawedOn: "",
+      frozen: false,
+      inStock: true,
+      price: d.price || "",
+      bagGrams: d.bagGrams || ""
+    } : b));
+    setBagDlg(null);
+  };
+  const delBag = id => upd(bs => bs.map(b => b.id === selId ? {
+    ...b,
+    bagHistory: (b.bagHistory || []).filter(x => x.id !== id)
   } : b));
   const saveGrind = () => {
     const e = {
@@ -4223,6 +4611,19 @@ function App() {
       if (bloomT) updM("bloomTime", bloomT);
       if (total) updM("totalTime", total);
       updM("pours", text);
+    } else if (method === "switch") {
+      const dose = g([/dose[:\s]+(\d+(?:\.\d+)?)\s*g/i]);
+      const water = g([/water[:\s]+(\d+)\s*g/i, /(\d+)\s*g\s*water/i]);
+      const temp = g([/(\d+(?:\.\d+)?)\s*°?F/i]);
+      const steep = g([/steep[^\n]*?(\d+)\s*(?:s|sec|secs|seconds)\b/i]);
+      const steepMin = text.match(/steep[^\n]*?(\d+):(\d{2})/i);
+      const steepM = text.match(/steep[^\n]*?(\d+(?:\.\d+)?)\s*min/i);
+      const total = text.match(/total[^\n]*?(\d+:\d+)/i)?.[1];
+      if (dose) updM("dose", dose);
+      if (water) updM("water", water);
+      if (temp) updM("temp", temp);
+      if (steepMin) updM("steepTime", String(+steepMin[1] * 60 + +steepMin[2]));else if (steep) updM("steepTime", steep);else if (steepM) updM("steepTime", String(Math.round(parseFloat(steepM[1]) * 60)));
+      if (total) updM("totalTime", total);
     } else if (method === "moccamaster") {
       const dose = g([/dose[:\s]+(\d+(?:\.\d+)?)\s*g/i]);
       const water = g([/water[:\s]+(\d+)\s*(?:ml|g)/i, /(\d+)\s*(?:ml|g)\s*water/i]);
@@ -4416,16 +4817,18 @@ function App() {
       setPhotoLoading(true);
       setPhotoImport(null);
       const r = await callClaudeVision("You read coffee bag labels and extract structured info. Return ONLY valid JSON, no markdown, no explanation.", `Read this coffee bag label/photo and extract as much as you can identify. Leave a field as empty string "" if not visible or not stated on the bag. Return JSON exactly in this shape:\n{"roaster":"","name":"","origin":"","process":"","roast":"","altitude":"","varietal":"","flavorProfile":"","roastDate":""}\nFor roast, use one of: Light, Light-Medium, Medium, Medium-Dark, Dark — infer from any roast description if not explicit. For roastDate, use YYYY-MM-DD format if a date is visible, else leave empty.`, dataUrl, true);
-      if (r) {
+      const f = r ? cleanBeanFields(r) : {};
+      delete f.imageUrl;
+      if (Object.keys(f).length) {
         setDraft(d => ({
           ...d,
-          ...r,
-          name: titleCase(r.name),
-          roaster: snapRoaster(r.roaster, rGroups),
+          ...f,
+          name: f.name ? titleCase(f.name) : d.name,
+          roaster: f.roaster ? snapRoaster(f.roaster, rGroups) : d.roaster,
           imageBase64: small,
           imageUrl: ""
         }));
-        setPhotoImport(r);
+        setPhotoImport(f);
       } else setPhotoImport({
         error: "Couldn't read the label clearly. Try a closer, well-lit photo, or fill in manually."
       });
@@ -4443,12 +4846,19 @@ function App() {
       setAwayPhotoLoading(true);
       setAwayPhotoImport(null);
       const r = await callClaudeVision("You read coffee bag labels and menu boards and extract structured info. Return ONLY valid JSON, no markdown, no explanation.", `Read this coffee bag label or cafe menu/board photo and extract what you can identify. Leave a field as empty string "" if not visible or not stated. Return JSON exactly in this shape:\n{"name":"","roaster":"","origin":"","process":"","roast":"","flavorProfile":""}\nFor roast, use one of: Light, Light-Medium, Medium, Medium-Dark, Dark — infer from description if not explicit.`, dataUrl, true);
-      if (r) {
+      const f = {};
+      if (r) ["name", "roaster", "origin", "process", "roast", "flavorProfile"].forEach(k => {
+        const v = r[k];
+        if (typeof v === "string" && v.trim()) f[k] = v.trim();
+      });
+      if (f.name) f.name = titleCase(f.name);
+      if (f.roaster) f.roaster = snapRoaster(f.roaster, rGroups);
+      if (Object.keys(f).length) {
         setAwayDraft(d => ({
           ...d,
-          ...r
+          ...f
         }));
-        setAwayPhotoImport(r);
+        setAwayPhotoImport(f);
       } else setAwayPhotoImport({
         error: "Couldn't read the label clearly. Try a closer, well-lit photo, or fill in manually."
       });
@@ -4465,13 +4875,13 @@ function App() {
     const slow = shotTime && parseInt(shotTime) > 35 ? " SHOT WAS SLOW — do NOT recommend finer grind." : "";
     const fast = shotTime && parseInt(shotTime) < 22 ? " SHOT WAS FAST — do NOT recommend coarser grind." : "";
     const cCtx = compass ? ` Compass: ${compass.label} — ${compass.desc}.` : "";
-    const ctx0 = method === "espresso" ? `Bean:${cur.name}(${cur.roaster}),${cur.origin},${cur.process},${cur.roast}. Setup:${md.dose}g/${md.temp}°F/grind ${grindLabel(lg?.position)}/pre-brew ${md.preBrew}. THIS SHOT:time=${tStr},yield=${yStr}.${slow}${fast}${cCtx}` : method === "aeropress" ? `Bean:${cur.name},${cur.process},${cur.roast}. AeroPress:${md.dose}g/${md.water}g/${md.temp}°F/steep ${md.steepTime}s/press ${md.pressTime}s.Inverted:${md.inverted}.Bloom:${md.bloom} ${md.bloomTime}s.Grind:${grindLabel(lg?.position)}.` : method === "moccamaster" ? `Bean:${cur.name},${cur.process},${cur.roast}. Moccamaster KBT batch drip:${md.dose}g/${md.water}ml (ratio ${ratioStr(md.dose, md.water)}),brew time ${md.totalTime}.Grind:${grindLabel(lg?.position)}.` : `Bean:${cur.name},${cur.process},${cur.roast}. Pour Over V60:${md.dose}g/${md.water}g/${md.temp}°F/bloom ${md.bloomAmount}g ${md.bloomTime}s/total ${md.totalTime}.Grind:${grindLabel(lg?.position)}.`;
-    const tCtx = tastes.length ? ` Cup tastes: ${tastes.join(", ")}.` : "";
+    const ctx0 = method === "espresso" ? `Bean:${cur.name}(${cur.roaster}),${cur.origin},${cur.process},${cur.roast}. Setup:${md.dose}g/${md.temp}°F/grind ${grindLabel(lg?.position)}/pre-brew ${md.preBrew}. THIS SHOT:time=${tStr},yield=${yStr}.${slow}${fast}${cCtx}` : method === "aeropress" ? `Bean:${cur.name},${cur.process},${cur.roast}. AeroPress:${md.dose}g/${md.water}g/${md.temp}°F/steep ${md.steepTime}s/press ${md.pressTime}s.Inverted:${md.inverted}.Bloom:${md.bloom} ${md.bloomTime}s.Grind:${grindLabel(lg?.position)}.` : method === "switch" ? `Bean:${cur.name},${cur.process},${cur.roast}. Hario Switch (steep and release, paper filter):${md.dose}g/${md.water}g/${md.temp}°F/steep ${md.steepTime}s with the switch closed/total ${md.totalTime}.Grind:${grindLabel(lg?.position)}.` : method === "moccamaster" ? `Bean:${cur.name},${cur.process},${cur.roast}. Moccamaster KBT batch drip:${md.dose}g/${md.water}ml (ratio ${ratioStr(md.dose, md.water)}),brew time ${md.totalTime}.Grind:${grindLabel(lg?.position)}.` : `Bean:${cur.name},${cur.process},${cur.roast}. Pour Over V60:${md.dose}g/${md.water}g/${md.temp}°F/bloom ${md.bloomAmount}g ${md.bloomTime}s/total ${md.totalTime}.Grind:${grindLabel(lg?.position)}.`;
+    const tCtx = (tastes.length ? ` Cup tastes: ${tastes.join(", ")}.` : "") + decafNote(cur);
     const hCtx = (cur.shots?.[method] || []).slice(-4).map(s => `[${s.date} grind ${s.grind ? grindLabel(s.grind) : "?"} dose ${s.dose || "?"} time ${s.time || "?"} zone ${s.zone} move ${s.move || "-"}]`).join(" ");
     const thawCtx = cur.thawedOn ? ` Beans were frozen, thawed ${cur.thawedOn}.` : isFrozen(cur) ? " Beans are frozen." : "";
     const ctx = ctx0 + tCtx + thawCtx + (hCtx ? ` Recent dial-in shots (oldest first): ${hCtx}. Give ONE change only, a small step, and never contradict the slow/fast rules.` : " Give ONE change only, a small step.");
     if (followup) {
-      const r = await callClaude(SYSTEM, `Previous setup and diagnosis:\n${lastDiagCtx}\nPrevious advice:\n${aiResult}\n\nThe person made this adjustment and pulled again: ${followup}\nCurrent setup:${ctx}\n\nDid the adjustment help? What should they try next?`);
+      const r = await callClaude(systemFor(method), `Previous setup and diagnosis:\n${lastDiagCtx}\nPrevious advice:\n${aiResult}\n\nThe person made this adjustment and pulled again: ${followup}\nCurrent setup:${ctx}\n\nDid the adjustment help? What should they try next?`);
       setAiResult(r);
       setAiLoading(false);
       setDiagFollowup("");
@@ -4479,18 +4889,18 @@ function App() {
     }
     const msg = diagInput.trim() ? `Setup:${ctx}\nTasting:${diagInput}\nAdjustments?` : `Setup:${ctx}\nCompass:${compass?.label || "inferred from the tastes above"}.Adjustments?`;
     setLastDiagCtx(ctx);
-    const r = await callClaude(SYSTEM, msg);
+    const r = await callClaude(systemFor(method), msg);
     setAiResult(r);
     setAiLoading(false);
   };
   const genRecipe = async feedback => {
     setAiLoading(true);
     setAiResult("");
-    const bInfo = `${cur.name} by ${cur.roaster}. Origin:${cur.origin}. Process:${cur.process}. Roast:${cur.roast}.`;
+    const bInfo = `${cur.name} by ${cur.roaster}. Origin:${cur.origin}. Process:${cur.process}. Roast:${cur.roast}.${decafNote(cur)}`;
     const saved = cur.savedRecipes?.[method];
     const prev = activeRecipeIdx !== null && saved ? saved[activeRecipeIdx]?.text : null;
-    const inst = method === "aeropress" ? "Generate AeroPress recipe. Uses PAPER filter. Max 220g water. Include:dose(g),water(g≤220),temp(°F),inverted or standard,bloom time(s),steep time(s),press time(s),grind setting on 0-12 scale with dots (e.g. 5··). Brief rationale." : method === "moccamaster" ? "Generate a Moccamaster KBT full-size batch drip recipe (#4 cone paper filter, brew temp is fixed by the machine so do not specify temperature). Include:dose(g),water(ml, max 1250),ratio,expected total brew time,grind on 0-12 scale with dots. Brief rationale." : "Generate pour over for Hario V60 with METAL filter (grind coarser than paper). Include:dose(g),water(g),temp(°F),bloom amount(g) and time(s),pour sequence with timing,total time,grind on 0-12 scale. Brief rationale.";
-    const r = await callClaude(SYSTEM, `Bean:${bInfo}${recipeCtx ? `\nContext:${recipeCtx}` : ""}${prev ? `\nPrevious recipe:\n${prev}` : ""}${feedback ? `\nFeedback:${feedback}\nAdjust accordingly.` : ""}\n\n${inst}`);
+    const inst = method === "aeropress" ? "Generate AeroPress recipe. Uses PAPER filter. Max 220g water. Include:dose(g),water(g≤220),temp(°F),inverted or standard,bloom time(s),steep time(s),press time(s),grind setting on 0-12 scale with dots (e.g. 5··). Brief rationale." : method === "switch" ? "Generate a Hario Switch recipe (steep and release, PAPER V60 filter). Include:dose(g),water(g),temp(°F),steep time with the switch closed(s),expected drawdown and total time,grind on 0-12 scale with dots (e.g. 6··). Brief rationale." : method === "moccamaster" ? "Generate a Moccamaster KBT full-size batch drip recipe (#4 cone paper filter, brew temp is fixed by the machine so do not specify temperature). Include:dose(g),water(ml, max 1250),ratio,expected total brew time,grind on 0-12 scale with dots. Brief rationale." : "Generate pour over for Hario V60 with METAL filter (grind coarser than paper). Include:dose(g),water(g),temp(°F),bloom amount(g) and time(s),pour sequence with timing,total time,grind on 0-12 scale. Brief rationale.";
+    const r = await callClaude(systemFor(method), `Bean:${bInfo}${recipeCtx ? `\nContext:${recipeCtx}` : ""}${prev ? `\nPrevious recipe:\n${prev}` : ""}${feedback ? `\nFeedback:${feedback}\nAdjust accordingly.` : ""}\n\n${inst}`);
     setAiResult(r);
     setAiLoading(false);
   };
@@ -4694,7 +5104,7 @@ function App() {
       name: f.name ? titleCase(f.name) : d.name,
       roaster: f.roaster ? snapRoaster(f.roaster, rGroups) : d.roaster,
       price: pm ? pm[1] : "",
-      bagGrams: gm && /g\b/i.test(gm[0]) ? gm[1] : ""
+      bagGrams: gm ? /oz/i.test(gm[0]) ? String(Math.round(gm[1] * 28.35)) : gm[1] : ""
     }));
     setScreen("beans");
   };
@@ -4715,6 +5125,27 @@ function App() {
         name: "Press",
         duration: md.pressTime,
         action: "Press slowly and steadily"
+      });
+    } else if (m === "switch") {
+      const steep = parseInt(md.steepTime) || 120;
+      const tm = String(md.totalTime || "").match(/^(\d+):(\d{1,2})$/);
+      const total = tm ? +tm[1] * 60 + +tm[2] : 0;
+      stages.push({
+        name: "Steep",
+        duration: String(steep),
+        action: `Switch closed. Pour all ${md.water || 300}g, then one gentle stir`
+      });
+      stages.push({
+        name: "Drain",
+        duration: String(total > steep + 10 ? total - steep : 45),
+        action: "Open the switch and let it drain"
+      });
+    } else if (m === "moccamaster") {
+      const tm = String(md.totalTime || "").match(/^(\d+):(\d{1,2})$/);
+      stages.push({
+        name: "Brewing",
+        duration: String(tm ? +tm[1] * 60 + +tm[2] : 360),
+        action: `${md.dose || 60}g with ${md.water || 1000}ml. The machine does the rest`
       });
     } else {
       if (md.bloomAmount && md.bloomTime) stages.push({
@@ -4748,6 +5179,11 @@ function App() {
     }
   };
   const exportText = compact => {
+    if (!compact && !photosReady) {
+      setBackupMsg("Still loading your photos. Try again in a moment.");
+      setTimeout(() => setBackupMsg(""), 4000);
+      return "";
+    }
     const trimmedBeans = compact ? beans.map(({
       imageBase64,
       ...rest
@@ -4765,6 +5201,11 @@ function App() {
     return t;
   };
   const backupAll = async () => {
+    if (!photosReady) {
+      setBackupMsg("Still loading your photos. Try again in a moment.");
+      setTimeout(() => setBackupMsg(""), 4000);
+      return;
+    }
     const payload = {
       type: "coffeeLogExport",
       version: 2,
@@ -4773,7 +5214,7 @@ function App() {
       awayLog,
       matches: matchHistory
     };
-    const name = "coffee-log-backup-" + new Date().toISOString().slice(0, 10) + ".txt";
+    const name = "coffee-log-backup-" + todayISO() + ".txt";
     const r = await saveBackupFile(JSON.stringify(payload), name);
     if (r === "shared" || r === "downloaded") {
       setLastBackup(markBackupDone());
@@ -4896,7 +5337,7 @@ function App() {
     setCompareResult("");
     const describe = b => {
       const e = b.methods.espresso;
-      return `${b.name} by ${b.roaster}. Origin: ${b.origin || "unknown"}. Process: ${b.process || "unknown"}. Roast: ${b.roast || "unknown"}.${b.altitude ? " Altitude: " + b.altitude + "." : ""}${b.flavorProfile ? " Flavor: " + b.flavorProfile + "." : ""} Rating: ${b.rating || "not rated"}/10. Espresso dialed at ${e.dose}g→${e.yield}g/${e.time}s/${e.temp}°F.${e.notes ? " Tasting notes: " + e.notes : ""}`;
+      return `${b.name} by ${b.roaster}. Origin: ${b.origin || "unknown"}. Process: ${b.process || "unknown"}. Roast: ${b.roast || "unknown"}.${b.decaf ? " Decaf." : ""}${b.altitude ? " Altitude: " + b.altitude + "." : ""}${b.flavorProfile ? " Flavor: " + b.flavorProfile + "." : ""} Rating: ${b.rating || "not rated"}/10. Espresso dialed at ${e.dose}g→${e.yield}g/${e.time}s/${e.temp}°F.${e.notes ? " Tasting notes: " + e.notes : ""}`;
     };
     const r = await callClaude("You are a coffee expert comparing two or more beans for someone deciding what to brew next. Be specific, reference the actual differences, keep it tight. Write in short paragraphs and bullet points only — never use a markdown table (no | pipe characters or --- separator rows), since the output renders as plain text.", `Compare these coffees and tell me: 1) the key differences that would actually affect flavor/brewing, 2) which one fits which mood or method better, 3) a one-line recommendation for right now.\n\n${compBeans.map((b, i) => `Bean ${i + 1}: ${describe(b)}`).join("\n\n")}`);
     setCompareResult(r);
@@ -4912,18 +5353,19 @@ function App() {
       const gl = b.grindLogs[method]?.slice(-1)[0];
       if (method === "espresso") return `${b.name} (${b.origin || "?"}, ${b.process || "?"}, ${b.roast || "?"}) rated ${b.rating}/10 — dialed at ${m.dose}g→${m.yield}g/${m.time}s/${m.temp}°F${gl ? ", grind " + grindLabel(gl.position) : ""}${m.notes ? ". Notes: " + m.notes : ""}`;
       if (method === "aeropress") return `${b.name} (${b.origin || "?"}, ${b.process || "?"}, ${b.roast || "?"}) rated ${b.rating}/10 — dialed at ${m.dose}g/${m.water}g/${m.temp}°F, steep ${m.steepTime}s${gl ? ", grind " + grindLabel(gl.position) : ""}${m.notes ? ". Notes: " + m.notes : ""}`;
+      if (method === "switch") return `${b.name} (${b.origin || "?"}, ${b.process || "?"}, ${b.roast || "?"}) rated ${b.rating}/10 — dialed at ${m.dose}g/${m.water}g/${m.temp}°F, steep ${m.steepTime}s${gl ? ", grind " + grindLabel(gl.position) : ""}${m.notes ? ". Notes: " + m.notes : ""}`;
       if (method === "moccamaster") return `${b.name} (${b.origin || "?"}, ${b.process || "?"}, ${b.roast || "?"}) rated ${b.rating}/10 — dialed at ${m.dose}g/${m.water}ml${gl ? ", grind " + grindLabel(gl.position) : ""}${m.notes ? ". Notes: " + m.notes : ""}`;
       return `${b.name} (${b.origin || "?"}, ${b.process || "?"}, ${b.roast || "?"}) rated ${b.rating}/10 — dialed at ${m.dose}g/${m.water}g/${m.temp}°F${gl ? ", grind " + grindLabel(gl.position) : ""}${m.notes ? ". Notes: " + m.notes : ""}`;
     }).join("\n");
     const methodLabel = METHOD_LABELS[method];
-    const prompt = `New, never-brewed bean: ${cur.name} by ${cur.roaster}. Origin: ${cur.origin || "unknown"}. Process: ${cur.process || "unknown"}. Roast: ${cur.roast || "unknown"}.${cur.altitude ? " Altitude: " + cur.altitude + "." : ""}${cur.varietal ? " Varietal: " + cur.varietal + "." : ""}${cur.flavorProfile ? " Flavor notes on bag: " + cur.flavorProfile + "." : ""}
+    const prompt = `New, never-brewed bean: ${cur.name} by ${cur.roaster}. Origin: ${cur.origin || "unknown"}. Process: ${cur.process || "unknown"}. Roast: ${cur.roast || "unknown"}.${cur.altitude ? " Altitude: " + cur.altitude + "." : ""}${cur.varietal ? " Varietal: " + cur.varietal + "." : ""}${cur.flavorProfile ? " Flavor notes on bag: " + cur.flavorProfile + "." : ""}${decafNote(cur)}
 
 I want a starting point for ${methodLabel} on this bean. I haven't pulled a shot yet — don't waste my beans on a bad guess.
 
 ${similar.length ? "Here's how similar beans from my collection are dialed in on this same grinder, which should inform the starting point:\n" + similarCtx : "No closely similar beans in my collection yet — base this on best practice for this origin/process/roast combination."}
 
-Give me: dose, ${method === "espresso" ? "yield, time, temp, pre-brew" : method === "moccamaster" ? "water amount in ml, brew time" : "water amount, temp, " + (method === "aeropress" ? "steep time, press time" : "bloom amount/time, total time")}, and a starting grind setting on a 0-12 scale (0-1 range for espresso). One or two sentences of reasoning tied to the bean's specific process/origin. Keep it tight.`;
-    const r = await callClaude(SYSTEM, prompt);
+Give me: dose, ${method === "espresso" ? "yield, time, temp, pre-brew" : method === "moccamaster" ? "water amount in ml, brew time" : "water amount, temp, " + (method === "aeropress" ? "steep time, press time" : method === "switch" ? "steep time with the switch closed, total time" : "bloom amount/time, total time")}, and a starting grind setting on a 0-12 scale (0-1 range for espresso). One or two sentences of reasoning tied to the bean's specific process/origin. Keep it tight.`;
+    const r = await callClaude(systemFor(method), prompt);
     setStartPointResult(prev => ({
       ...prev,
       [cur.id + "_" + method]: r
@@ -4937,6 +5379,8 @@ Give me: dose, ${method === "espresso" ? "yield, time, temp, pre-brew" : method 
     if (ao !== bo) return ao ? 1 : -1;
     return (b.rating || 0) - (a.rating || 0);
   });
+  const qq = beans.length > 8 ? q.trim().toLowerCase() : "";
+  const shownBeans = qq ? sortedBeans.filter(b => [b.name, b.roaster, b.origin, b.process, b.roast, b.flavorProfile].some(v => String(v || "").toLowerCase().includes(qq))) : sortedBeans;
   const imgUrl = cur?.imageBase64 || cur?.imageUrl;
   const AiBox = ({
     showSave
@@ -5308,6 +5752,28 @@ Give me: dose, ${method === "espresso" ? "yield, time, temp, pre-brew" : method 
       .resume-note{margin:6px 14px 0;padding:10px 14px;border:1px solid var(--border);border-radius:var(--r);background:var(--bg2);color:var(--text2);font-size:13px;display:flex;gap:12px;align-items:center;justify-content:space-between;line-height:1.45;}
       .drill-modal{max-height:78vh;overflow-y:auto;}
       .rank-row{width:100%;text-align:left;color:inherit;}
+      .pill.tag{color:var(--gold);border-color:rgba(212,170,122,.45);}
+      .method-row{overflow-x:auto;}
+      .bimg{position:relative;overflow:hidden;}
+      .bimg img{position:absolute;max-width:none;display:block;}
+      .bean-hero-img.bimg{display:block;width:100%;}
+      .bc-img.bimg{display:block;}
+      .kiosk-card-img.bimg{display:block;}
+      .crop-box-frame{height:auto;aspect-ratio:39/20;border-radius:var(--r);border-color:var(--border);background:var(--bg3);}
+      .crop-box-frame img{position:absolute;max-width:none;width:auto;height:auto;object-fit:fill;}
+      .crop-box-hint{border-radius:999px;font-family:var(--sans);font-size:11px;padding:4px 10px;}
+      .crop-step{min-width:40px;font-size:18px;line-height:1;padding:7px 0;flex-shrink:0;}
+      .field input[type=range],.img-adjust-slider{height:4px;padding:0;border:none;border-radius:2px;background:var(--border);flex:1;min-width:0;}
+      .img-adjust-slider::-webkit-slider-thumb{width:22px;height:22px;}
+      .crop-box-btns{display:flex;gap:8px;align-items:center;margin-top:10px;flex-wrap:wrap;}
+      .crop-thumb{margin-left:auto;display:flex;align-items:center;gap:8px;font-size:11.5px;color:var(--muted);}
+      .crop-thumb .bc-img{width:48px;height:48px;border-radius:9px;}
+      .btn.d.armed{background:#6a2222;border-color:var(--red);color:#fff;}
+      .bean-search{width:100%;margin-top:12px;background:var(--bg2);border:1px solid var(--border2);color:var(--text);font-family:var(--sans);font-size:16px;padding:10px 13px;border-radius:999px;outline:none;-webkit-appearance:none;appearance:none;}
+      .bean-search::placeholder{color:var(--muted);}
+      .bean-search:focus{border-color:var(--gold);}
+      .field input[type=date],.modal input[type=date]{min-height:46px;-webkit-appearance:none;appearance:none;text-align:left;display:block;width:100%;}
+      .bud{border-radius:999px;font-family:var(--sans);font-size:13px;padding:8px 13px;}
       .save-warn{margin:8px 14px 0;padding:13px 15px;border:1px solid var(--red);border-radius:var(--r);background:#2a1414;color:#f0d8d8;}
       /* list */
       .list-hdr{background:transparent;padding:4px 16px 12px;}
@@ -5349,11 +5815,11 @@ Give me: dose, ${method === "espresso" ? "yield, time, temp, pre-brew" : method 
       .pill{padding:4px 11px;background:rgba(255,255,255,.025);}
       .fpill{padding:4px 11px;}
       .rating-val{font-family:var(--mono);}
-      .method-row{background:transparent;border-bottom:none;padding:4px 14px 12px;gap:6px;}
-      .method-btn{flex:1 1 0;min-width:0;text-align:center;font-family:var(--sans);font-size:12.5px;font-weight:500;letter-spacing:0;text-transform:none;padding:8px 4px;border-radius:999px;border:1px solid var(--border2);color:var(--text3);margin:0;background:rgba(255,255,255,.025);}
+      .method-row{background:transparent;border-bottom:none;padding:4px 12px 12px;gap:5px;}
+      .method-btn{flex:1 1 auto;text-align:center;font-family:var(--sans);font-size:11.5px;font-weight:500;letter-spacing:-.15px;text-transform:none;padding:9px 5px;border-radius:999px;border:1px solid var(--border2);color:var(--text3);margin:0;background:rgba(255,255,255,.025);}
       .method-btn.active{color:#1a120a;background:var(--gold);border-color:var(--gold);font-weight:600;}
       .tabs{padding:0 8px;border-bottom:1px solid var(--border2);}
-      .tab{font-family:var(--sans);font-size:14px;font-weight:500;letter-spacing:0;text-transform:none;padding:10px 11px 11px;color:var(--muted);}
+      .tab{font-family:var(--sans);font-size:13.5px;font-weight:500;letter-spacing:0;text-transform:none;padding:10px 9px 11px;color:var(--muted);}
       .tab.active{color:var(--text);border-bottom-color:var(--gold);}
       .tc{padding:18px 16px 44px;}
       .pm,.grind-inline,.saved-recipe,.ge,.ga-form,.compare-col,.stat-box,.donut-wrap,.pick,.compass-wrap,.start-point-box,.ai-box,.move-card,.dialed-card,.kiosk-card,.compass-result,.empty-grind,.param-dd,.crop-box-frame,.photo-preview-img{border-radius:var(--r);}
@@ -5505,7 +5971,7 @@ Give me: dose, ${method === "espresso" ? "yield, time, temp, pre-brew" : method 
     }
   }, React.createElement("span", null, "Settings"), React.createElement("span", {
     className: "export-menu-sub"
-  }, "Anthropic API key")))))), !kioskMode && React.createElement("div", {
+  }, "API key, brewers and AI model")))))), !kioskMode && React.createElement("div", {
     className: "screen-nav"
   }, [["beans", "Beans", React.createElement(React.Fragment, null, React.createElement("ellipse", {
     cx: "12",
@@ -5574,7 +6040,7 @@ Give me: dose, ${method === "espresso" ? "yield, time, temp, pre-brew" : method 
       marginBottom: 10,
       lineHeight: 1.5
     }
-  }, "This app has run out of storage on your phone, so anything new will be lost when you close it. Save a backup file now, then remove a few bean photos to free up space."), React.createElement("button", {
+  }, "This app could not save to your phone's storage, so anything new will be lost when you close it. Save a backup file now, then close and reopen the app. If it keeps happening, your phone may be very low on space."), React.createElement("button", {
     className: "btn p sm",
     onClick: backupAll
   }, "Save backup to Files")), backupMsg && React.createElement("div", {
@@ -5646,7 +6112,7 @@ Give me: dose, ${method === "espresso" ? "yield, time, temp, pre-brew" : method 
     style: {
       margin: "12px 15px",
       padding: "12px 14px",
-      border: "1px solid var(--accent)",
+      border: "1px solid var(--gold)",
       borderRadius: 10,
       background: "var(--bg2)"
     }
@@ -5661,9 +6127,15 @@ Give me: dose, ${method === "espresso" ? "yield, time, temp, pre-brew" : method 
       color: "var(--muted)",
       marginBottom: 10
     }
-  }, "A backup of ", autoBackup.beans.length, " beans from ", new Date(autoBackup.savedAt).toLocaleDateString(), " is available (photos not included)."), React.createElement("button", {
+  }, "A backup of ", autoBackup.beans.length, " beans from ", new Date(autoBackup.savedAt).toLocaleDateString(), " is available. Photos come back too if they are still on this phone."), React.createElement("button", {
     className: "btn p sm",
-    onClick: () => setBeans(autoBackup.beans.map(migrate))
+    onClick: () => setBeans(autoBackup.beans.map(migrate).map(b => {
+      const v = PHOTO_SYNCED[photoKey(b)];
+      return v && !b.imageBase64 && !b.imageUrl ? {
+        ...b,
+        imageBase64: v
+      } : b;
+    }))
   }, "Restore backup")), screen === "beans" && React.createElement("div", {
     className: "dl"
   }, React.createElement("div", {
@@ -5684,11 +6156,21 @@ Give me: dose, ${method === "espresso" ? "yield, time, temp, pre-brew" : method 
   }, beans.length, " beans · ", beans.filter(b => b.inStock !== false).length, " in stock")), React.createElement("button", {
     className: "btn p sm",
     onClick: startAdd
-  }, "+ Add"))), React.createElement("div", {
+  }, "+ Add")), beans.length > 8 && React.createElement("input", {
+    className: "bean-search",
+    type: "search",
+    placeholder: "Search beans, roasters, origins",
+    value: q,
+    onChange: e => setQ(e.target.value),
+    autoCorrect: "off",
+    autoCapitalize: "off"
+  })), React.createElement("div", {
     className: "list-scroll"
   }, beans.length === 0 && React.createElement("div", {
     className: "empty"
-  }, "No beans yet — tap + Add above"), sortedBeans.map(b => {
+  }, "No beans yet — tap + Add above"), beans.length > 0 && shownBeans.length === 0 && React.createElement("div", {
+    className: "empty"
+  }, "Nothing matches \"", q, "\""), shownBeans.map(b => {
     const eg = b.grindLogs?.espresso?.slice(-1)[0];
     const da = ageLabel(b);
     const img = b.imageBase64 || b.imageUrl;
@@ -5698,18 +6180,16 @@ Give me: dose, ${method === "espresso" ? "yield, time, temp, pre-brew" : method 
       key: b.id,
       className: "bean-card" + (selId === b.id ? " sel" : "") + (out ? " out" : "") + (b.currentlyBrewing ? " now" : ""),
       onClick: () => selectBean(b.id)
-    }, React.createElement("div", {
-      className: "bc-img"
-    }, img ? React.createElement("img", {
+    }, img ? React.createElement(BeanImg, {
+      className: "bc-img",
       src: img,
       alt: b.name,
-      style: {
-        width: "100%",
-        height: "100%",
-        objectFit: "cover"
-      },
-      onError: e => e.target.style.display = "none"
-    }) : "☕"), React.createElement("div", {
+      x: b.imageOffsetX,
+      y: b.imageOffsetY,
+      zoom: b.imageZoom
+    }) : React.createElement("div", {
+      className: "bc-img"
+    }, "☕"), React.createElement("div", {
       className: "bc-body"
     }, b.currentlyBrewing && React.createElement("div", {
       className: "bc-now"
@@ -5723,7 +6203,14 @@ Give me: dose, ${method === "espresso" ? "yield, time, temp, pre-brew" : method 
       className: "bc-badges"
     }, out && React.createElement("span", {
       className: "bc-badge out"
-    }, "Out of Stock"), !out && fr && fr.label !== "Peak" && React.createElement("span", {
+    }, "Out of Stock"), b.decaf && React.createElement("span", {
+      className: "bc-badge",
+      style: {
+        color: "var(--text3)",
+        borderColor: "var(--border)",
+        background: "transparent"
+      }
+    }, "Decaf"), !out && fr && fr.label !== "Peak" && React.createElement("span", {
       className: "bc-badge",
       style: {
         color: fr.color,
@@ -5949,7 +6436,7 @@ Give me: dose, ${method === "espresso" ? "yield, time, temp, pre-brew" : method 
       margin: "0 -16px",
       width: "calc(100% + 32px)"
     }
-  }, METHODS.map(m => React.createElement("button", {
+  }, shownMethods.map(m => React.createElement("button", {
     key: m,
     className: "method-btn" + (method === m ? " active" : ""),
     onClick: () => setMethod(m)
@@ -5977,15 +6464,13 @@ Give me: dose, ${method === "espresso" ? "yield, time, temp, pre-brew" : method 
     }
   }, "← Select a bean"), cur && React.createElement(React.Fragment, null, React.createElement("div", {
     className: "bean-hero"
-  }, imgUrl && React.createElement("img", {
+  }, imgUrl && React.createElement(BeanImg, {
     src: imgUrl,
     alt: cur.name,
     className: "bean-hero-img",
-    style: {
-      objectPosition: `${cur.imageOffsetX ?? 50}% ${cur.imageOffsetY ?? 50}%`,
-      transform: `scale(${(cur.imageZoom || 100) / 100})`
-    },
-    onError: e => e.target.style.display = "none"
+    x: cur.imageOffsetX,
+    y: cur.imageOffsetY,
+    zoom: cur.imageZoom
   }), React.createElement("div", {
     className: "bean-hero-content"
   }, React.createElement("div", {
@@ -6044,7 +6529,14 @@ Give me: dose, ${method === "espresso" ? "yield, time, temp, pre-brew" : method 
       color: "var(--gold)"
     },
     onClick: () => setCardDlg(method)
-  }, "Share Card")), React.createElement("div", {
+  }, "Share Card"), React.createElement("button", {
+    className: "btn sm",
+    onClick: () => setBagDlg({
+      roastDate: "",
+      price: cur.price || "",
+      bagGrams: cur.bagGrams || ""
+    })
+  }, "New Bag")), React.createElement("div", {
     className: "pills"
   }, cur.origin && React.createElement("span", {
     className: "pill"
@@ -6054,12 +6546,16 @@ Give me: dose, ${method === "espresso" ? "yield, time, temp, pre-brew" : method 
     className: "pill"
   }, cur.roast), cur.altitude && React.createElement("span", {
     className: "pill"
-  }, cur.altitude)), React.createElement(StarRating, {
+  }, cur.altitude), cur.decaf && React.createElement("span", {
+    className: "pill tag"
+  }, "Decaf"), (cur.bagHistory || []).length > 0 && React.createElement("span", {
+    className: "pill tag"
+  }, "Bag ", cur.bagHistory.length + 1)), React.createElement(StarRating, {
     value: cur.rating || 0,
     onChange: v => updB("rating", v)
   }))), React.createElement("div", {
     className: "method-row"
-  }, METHODS.map(m => React.createElement("button", {
+  }, shownMethods.map(m => React.createElement("button", {
     key: m,
     className: "method-btn" + (method === m ? " active" : ""),
     onClick: () => {
@@ -6082,7 +6578,7 @@ Give me: dose, ${method === "espresso" ? "yield, time, temp, pre-brew" : method 
     key: t,
     className: "tab" + (tab === t ? " active" : ""),
     onClick: () => setTab(t)
-  }, t === "recipe" ? "Recipes" : t === "info" ? "Bean Info" : t.charAt(0).toUpperCase() + t.slice(1))), React.createElement("button", {
+  }, t === "recipe" ? "Recipes" : t === "info" ? "Info" : t.charAt(0).toUpperCase() + t.slice(1))), React.createElement("button", {
     className: "tab",
     onClick: startEdit
   }, "Edit")), React.createElement("div", {
@@ -6246,7 +6742,89 @@ Give me: dose, ${method === "espresso" ? "yield, time, temp, pre-brew" : method 
       className: "btn sm",
       onClick: () => setTab("recipe")
     }, "View All →"))) : null;
+  })()), method === "switch" && React.createElement(React.Fragment, null, React.createElement("button", {
+    className: "btn timer-btn",
+    onClick: () => launchTimer("switch")
+  }, "▶ Start Switch Timer"), React.createElement("div", {
+    className: "pg"
+  }, React.createElement(ShotParam, {
+    label: "Dose",
+    value: md.dose,
+    unit: "g",
+    onSave: v => updM("dose", v),
+    options: DOSES_MAN
+  }), React.createElement(ShotParam, {
+    label: "Water",
+    value: md.water,
+    unit: "g",
+    onSave: v => updM("water", v),
+    options: WATER_SWITCH
+  }), React.createElement(ShotParam, {
+    label: "Temp",
+    value: md.temp,
+    unit: "°F",
+    onSave: v => updM("temp", v),
+    options: TEMPS
+  }), React.createElement(ShotParam, {
+    label: "Steep (closed)",
+    value: md.steepTime,
+    unit: "s",
+    onSave: v => updM("steepTime", v),
+    options: STEEP_OPTS
+  }), React.createElement(ShotParam, {
+    label: "Total Time",
+    value: md.totalTime,
+    onSave: v => updM("totalTime", v)
+  }), React.createElement("div", {
+    className: "pm"
+  }, React.createElement("div", {
+    className: "pm-lbl"
+  }, "Ratio"), React.createElement("div", {
+    className: "pm-val sm"
+  }, ratioStr(md.dose, md.water)))), (() => {
+    const r = cur.savedRecipes?.switch || [];
+    const last = r.slice(-1)[0];
+    return last ? React.createElement("div", {
+      style: {
+        marginBottom: 14
+      }
+    }, React.createElement("div", {
+      className: "sec-lbl",
+      style: {
+        marginBottom: 6
+      }
+    }, "Active Recipe"), React.createElement("div", {
+      className: "saved-recipe"
+    }, React.createElement("div", {
+      className: "saved-recipe-date"
+    }, last.date), React.createElement("div", {
+      className: "saved-recipe-text"
+    }, last.text), React.createElement("button", {
+      className: "btn sm",
+      onClick: () => setTab("recipe")
+    }, "View All →"))) : null;
   })()), method === "moccamaster" && React.createElement(React.Fragment, null, React.createElement("div", {
+    className: "sec-lbl",
+    style: {
+      marginBottom: 6
+    }
+  }, "Batch size"), React.createElement("div", {
+    className: "bud-row"
+  }, [["500", "30", "½ L"], ["750", "45", "¾ L"], ["1000", "60", "1 L"], ["1250", "75", "1¼ L"]].map(([w, d, l]) => React.createElement("button", {
+    key: w,
+    className: "bud" + (String(md.water) === w && String(md.dose) === d ? " on" : ""),
+    onClick: () => upd(bs => bs.map(b => b.id === selId ? {
+      ...b,
+      methods: {
+        ...b.methods,
+        moccamaster: {
+          ...b.methods.moccamaster,
+          water: w,
+          dose: d
+        }
+      }
+    } : b))
+  }, l, " · ", d, "g"))), React.createElement("div", {
     className: "pg"
   }, React.createElement(ShotParam, {
     label: "Dose",
@@ -6399,9 +6977,18 @@ Give me: dose, ${method === "espresso" ? "yield, time, temp, pre-brew" : method 
   })(), React.createElement("div", {
     className: "div"
   }), React.createElement("button", {
-    className: "btn d sm",
-    onClick: () => delBean(cur.id)
-  }, "Delete Bean")), tab === "grind" && React.createElement(React.Fragment, null, React.createElement("div", {
+    className: "btn d sm" + (confirmDel === cur.id ? " armed" : ""),
+    onClick: () => {
+      const id = cur.id;
+      if (confirmDel === id) {
+        setConfirmDel(null);
+        delBean(id);
+      } else {
+        setConfirmDel(id);
+        setTimeout(() => setConfirmDel(c => c === id ? null : c), 5000);
+      }
+    }
+  }, confirmDel === cur.id ? "Tap again to delete " + cur.name : "Delete Bean")), tab === "grind" && React.createElement(React.Fragment, null, React.createElement("div", {
     className: "sec-lbl",
     style: {
       marginBottom: 10
@@ -6718,9 +7305,9 @@ Give me: dose, ${method === "espresso" ? "yield, time, temp, pre-brew" : method 
       }
     }, React.createElement("button", {
       className: "btn p",
-      disabled: !zone,
+      disabled: !zone || !!compassRes,
       onClick: getMove
-    }, "Log shot & get next move"), (compass || tastes.length > 0 || compassRes) && React.createElement("button", {
+    }, compassRes ? "Shot logged" : "Log shot & get next move"), (compass || tastes.length > 0 || compassRes) && React.createElement("button", {
       className: "btn sm",
       onClick: () => {
         setCompass(null);
@@ -6819,7 +7406,41 @@ Give me: dose, ${method === "espresso" ? "yield, time, temp, pre-brew" : method 
         background: z.color
       }
     }, z.n), z.label))));
-  })(), tab === "info" && React.createElement(React.Fragment, null, (cur.altitude || cur.varietal || cur.flavorProfile) && React.createElement("div", {
+  })(), tab === "info" && React.createElement(React.Fragment, null, (cur.bagHistory || []).length > 0 && React.createElement(React.Fragment, null, React.createElement("div", {
+    className: "sec-lbl",
+    style: {
+      marginBottom: 8
+    }
+  }, "Bags of this coffee"), React.createElement("div", {
+    className: "gl",
+    style: {
+      marginBottom: 14
+    }
+  }, React.createElement("div", {
+    className: "ge"
+  }, React.createElement("div", null, React.createElement("div", {
+    className: "ge-pos",
+    style: {
+      fontSize: 14,
+      letterSpacing: 0
+    }
+  }, "Bag ", cur.bagHistory.length + 1, " (current)"), React.createElement("div", {
+    className: "ge-date"
+  }, cur.roastDate ? "roasted " + fmtDate(cur.roastDate) : "no roast date", num(cur.price) ? " · " + money(num(cur.price)) : "", num(cur.bagGrams) ? " · " + cur.bagGrams + "g" : ""))), [...cur.bagHistory].reverse().map((h, i) => React.createElement("div", {
+    key: h.id || i,
+    className: "ge"
+  }, React.createElement("div", null, React.createElement("div", {
+    className: "ge-pos",
+    style: {
+      fontSize: 14,
+      letterSpacing: 0
+    }
+  }, "Bag ", cur.bagHistory.length - i), React.createElement("div", {
+    className: "ge-date"
+  }, h.roastDate ? "roasted " + fmtDate(h.roastDate) : "no roast date", num(h.price) ? " · " + money(num(h.price)) : "", num(h.bagGrams) ? " · " + h.bagGrams + "g" : "", h.endedOn ? " · finished " + fmtDate(h.endedOn) : "")), React.createElement("button", {
+    className: "btn sm",
+    onClick: () => delBag(h.id)
+  }, "✕"))))), (cur.altitude || cur.varietal || cur.flavorProfile) && React.createElement("div", {
     className: "pg",
     style: {
       marginBottom: 14
@@ -7479,7 +8100,7 @@ Give me: dose, ${method === "espresso" ? "yield, time, temp, pre-brew" : method 
     style: {
       fontSize: 26,
       fontWeight: 800,
-      color: "var(--accent)"
+      color: "var(--gold)"
     }
   }, Math.round(matchResult.matchPct), "%")), React.createElement("div", {
     className: "ai-result",
@@ -7495,7 +8116,7 @@ Give me: dose, ${method === "espresso" ? "yield, time, temp, pre-brew" : method 
     className: "btn",
     onClick: resetMatch
   }, "Scan Another"), React.createElement("button", {
-    className: "btn primary",
+    className: "btn p",
     disabled: matchSaved,
     onClick: saveMatchResult
   }, matchSaved ? "✓ Saved" : "Save / Remember")))), matchHistory.length > 0 && React.createElement(React.Fragment, null, React.createElement("div", {
@@ -7570,7 +8191,15 @@ Give me: dose, ${method === "espresso" ? "yield, time, temp, pre-brew" : method 
     }
   }, "Quick log for coffee you tried at a cafe or elsewhere — no params needed."), addingAway && React.createElement("div", {
     className: "ga-form"
-  }, React.createElement("div", {
+  }, awayResumed && React.createElement("div", {
+    className: "resume-note",
+    style: {
+      margin: "0 0 12px"
+    }
+  }, React.createElement("span", null, "Picked up where you left off."), React.createElement("button", {
+    className: "btn-link",
+    onClick: () => setAwayResumed(false)
+  }, "OK")), React.createElement("div", {
     className: "sec-lbl",
     style: {
       marginBottom: 8
@@ -7778,17 +8407,16 @@ Give me: dose, ${method === "espresso" ? "yield, time, temp, pre-brew" : method 
         setScreen("beans");
         setShowList(false);
       }
-    }, React.createElement("div", {
-      className: "kiosk-card-img"
-    }, img ? React.createElement("img", {
+    }, img ? React.createElement(BeanImg, {
+      className: "kiosk-card-img",
       src: img,
       alt: b.name,
-      style: {
-        width: "100%",
-        height: "100%",
-        objectFit: "cover"
-      }
-    }) : "☕"), React.createElement("div", {
+      x: b.imageOffsetX,
+      y: b.imageOffsetY,
+      zoom: b.imageZoom
+    }) : React.createElement("div", {
+      className: "kiosk-card-img"
+    }, "☕"), React.createElement("div", {
       className: "kiosk-card-body"
     }, React.createElement("div", {
       className: "kiosk-card-name"
@@ -7874,11 +8502,19 @@ Give me: dose, ${method === "espresso" ? "yield, time, temp, pre-brew" : method 
     onClose: () => setShowTimer(false)
   }), showApiModal && React.createElement("div", {
     className: "modal-overlay",
-    onClick: () => setShowApiModal(false)
+    onClick: () => {
+      setShowApiModal(false);
+      setApiTest("");
+    }
   }, React.createElement("div", {
     className: "modal",
     onClick: e => e.stopPropagation()
-  }, React.createElement("h2", null, "API Key"), React.createElement("p", null, "Required for AI features. Stored on this device only."), React.createElement("p", null, "Get your key at ", React.createElement("strong", null, "console.anthropic.com")), window._COFFEE_API_KEY ? React.createElement("p", {
+  }, React.createElement("h2", null, "Settings"), React.createElement("div", {
+    className: "sec-lbl",
+    style: {
+      margin: "10px 0 6px"
+    }
+  }, "API key"), React.createElement("p", null, "Required for AI features. Stored on this device only."), React.createElement("p", null, "Get your key at ", React.createElement("strong", null, "console.anthropic.com")), window._COFFEE_API_KEY ? React.createElement("p", {
     style: {
       color: "var(--green)",
       marginBottom: 8,
@@ -7912,17 +8548,67 @@ Give me: dose, ${method === "espresso" ? "yield, time, temp, pre-brew" : method 
       borderTop: "1px solid var(--border)",
       paddingTop: 12
     }
-  }, React.createElement("button", {
+  }, React.createElement("div", {
+    className: "sec-lbl",
+    style: {
+      marginBottom: 6
+    }
+  }, "Brewers you use"), React.createElement("div", {
+    className: "tchips",
+    style: {
+      marginBottom: 6
+    }
+  }, METHODS.map(m => React.createElement("button", {
+    key: m,
+    type: "button",
+    className: "tchip" + (shownMethods.includes(m) ? " on" : ""),
+    onClick: () => toggleMethod(m)
+  }, METHOD_LABELS[m]))), React.createElement("p", {
+    style: {
+      fontSize: 12,
+      margin: "0 0 14px"
+    }
+  }, "Tap to hide a brewer you do not own. Nothing is deleted, and you can turn it back on any time."), React.createElement("div", {
+    className: "field"
+  }, React.createElement("label", null, "AI model"), React.createElement("select", {
+    className: "sel-input",
+    value: modelSel,
+    onChange: e => {
+      setModelSel(e.target.value);
+      setApiTest("");
+      try {
+        localStorage.setItem(MODEL_KEY, e.target.value);
+      } catch (err) {}
+    }
+  }, MODEL_OPTS.map(o => React.createElement("option", {
+    key: o[0],
+    value: o[0]
+  }, o[1])), !MODEL_OPTS.some(o => o[0] === modelSel) && React.createElement("option", {
+    value: modelSel
+  }, modelSel))), React.createElement("p", {
+    style: {
+      fontSize: 12,
+      margin: "6px 0 12px"
+    }
+  }, "Leave this alone unless the AI features stop working. If they do, pick another model here and test it."), React.createElement("button", {
     className: "btn ai",
     style: {
       width: "100%"
     },
+    disabled: apiTest === "Testing...",
     onClick: async () => {
       window._COFFEE_API_KEY = apiKeyInput.trim() || window._COFFEE_API_KEY;
-      const r = await callClaude("You are a helpful assistant.", "Say only: API key working!");
-      alert(r);
+      setApiTest("Testing...");
+      const r = await callClaude("You are a helpful assistant.", "Say only: Working!");
+      setApiTest(r || "No answer came back.");
     }
-  }, "Test Connection")))), cardDlg && cur && React.createElement(BrewCardModal, {
+  }, "Test Connection"), apiTest && React.createElement("p", {
+    style: {
+      fontSize: 13,
+      marginTop: 8,
+      color: /^Working/i.test(apiTest) ? "var(--green)" : apiTest === "Testing..." ? "var(--muted)" : "var(--red)"
+    }
+  }, apiTest)))), cardDlg && cur && React.createElement(BrewCardModal, {
     bean: cur,
     method: cardDlg,
     dialed: cur.dialed?.[cardDlg],
@@ -8010,6 +8696,58 @@ Give me: dose, ${method === "espresso" ? "yield, time, temp, pre-brew" : method 
   }, "Rename"), React.createElement("button", {
     className: "btn",
     onClick: () => setRenameDlg(null)
+  }, "Cancel")))), bagDlg && cur && React.createElement("div", {
+    className: "modal-overlay",
+    onClick: () => setBagDlg(null)
+  }, React.createElement("div", {
+    className: "modal",
+    onClick: e => e.stopPropagation()
+  }, React.createElement("h2", null, "New bag"), React.createElement("p", null, "Starting a fresh bag of ", cur.name, ". Your grind, recipes, rating and dialed settings stay. The roast date and freezer dates reset, and the bag is marked in stock. The old bag is kept under Info."), React.createElement("div", {
+    className: "field",
+    style: {
+      marginTop: 10
+    }
+  }, React.createElement("label", null, "Roast date of the new bag"), React.createElement("input", {
+    type: "date",
+    value: bagDlg.roastDate,
+    onChange: e => setBagDlg(d => ({
+      ...d,
+      roastDate: e.target.value
+    }))
+  })), React.createElement("div", {
+    className: "fg",
+    style: {
+      marginTop: 10
+    }
+  }, React.createElement(Field, {
+    label: "Price Paid ($)",
+    value: bagDlg.price,
+    inputMode: "decimal",
+    onChange: v => setBagDlg(d => ({
+      ...d,
+      price: v
+    })),
+    placeholder: "incl. shipping"
+  }), React.createElement(Field, {
+    label: "Bag Size (g)",
+    value: bagDlg.bagGrams,
+    inputMode: "decimal",
+    onChange: v => setBagDlg(d => ({
+      ...d,
+      bagGrams: v
+    })),
+    placeholder: "e.g. 250"
+  })), React.createElement("div", {
+    className: "fa",
+    style: {
+      marginTop: 12
+    }
+  }, React.createElement("button", {
+    className: "btn p",
+    onClick: saveNewBag
+  }, "Start new bag"), React.createElement("button", {
+    className: "btn",
+    onClick: () => setBagDlg(null)
   }, "Cancel")))), freezerDlg && cur && React.createElement("div", {
     className: "modal-overlay",
     onClick: () => setFreezerDlg(null)
