@@ -2322,7 +2322,7 @@ async function callClaudeVision(system, userText, imageDataUrl, json) {
 }
 const SYS_BASE = "You are an expert specialty coffee consultant. Grinder: Mahlkonig X64 SD single dose (0-1 range for espresso, full 0-12 for other methods, 5 dots between each number on the dial). Water: RO water with Third Wave minerals.";
 const SYS_GEAR = {
-  espresso: "Brewer for this question: La Marzocco Linea Micra (dual boiler) espresso machine.\nCRITICAL RULES: Shot SLOW >35s = NEVER finer grind. Shot FAST <22s = NEVER coarser. Sour+slow = channeling, fix puck prep first. Bitter+fast = over-extraction, coarser grind.",
+  espresso: "Brewer for this question: La Marzocco Linea Micra (dual boiler) espresso machine.\nGRIND SCALE: On this grinder espresso lives at the very fine end. Settings are written as the number plus dots, for example 0, 0·, 0··, 0···. This person's shots almost always land between 0 and 0···. A starting grind must be in that range, and it must never be 1 or higher. When unsure, start finer (0· or 0··), not coarser.\nCRITICAL RULES: Shot SLOW >35s = NEVER finer grind. Shot FAST <22s = NEVER coarser. Sour+slow = channeling, fix puck prep first. Bitter+fast = over-extraction, coarser grind.",
   aeropress: "Brewer for this question: standard AeroPress with a PAPER filter (not metal), max 220g water capacity, temperature-controlled kettle.\nCRITICAL RULES: Never exceed 220g water. Grind for a paper filter.",
   pourover: "Brewer for this question: Hario V60 with a METAL mesh filter (no paper), temperature-controlled kettle.\nCRITICAL RULES: Grind coarser than a paper-filter equivalent.",
   switch: "Brewer for this question: Hario Switch (glass V60 02 cone on a base with a shut-off valve), brewed as steep and release with a PAPER V60 filter, temperature-controlled kettle.\nCRITICAL RULES: The filter is paper. Give a steep time with the switch closed, then an expected drawdown after opening it. A typical recipe is switch closed, all the water in, steep about 2 minutes, open, drain in under a minute.",
@@ -4170,6 +4170,9 @@ function App() {
   const [matchResult, setMatchResult] = useState(null);
   const [matchPhoto, setMatchPhoto] = useState(null);
   const [matchSaved, setMatchSaved] = useState(false);
+  const [matchUrl, setMatchUrl] = useState("");
+  const [linkRes, setLinkRes] = useState(null);
+  const [linkSaved, setLinkSaved] = useState({});
   const [matchHistory, setMatchHistory] = useState(loadMatchHistory);
   const [tastes, setTastes] = useState([]);
   const [compassRes, setCompassRes] = useState(null);
@@ -5332,6 +5335,86 @@ function App() {
     setMatchResult(null);
     setMatchSaved(false);
   };
+  const matchLink = async () => {
+    const url = (matchUrl.match(/https?:\/\/[^\s<>"]+/) || [""])[0].replace(/[).,]+$/, "");
+    if (!url) {
+      setLinkRes({
+        error: "Paste a full link that starts with http, for example a coffee's page or a roaster's coffee page."
+      });
+      return;
+    }
+    if (!beans.some(b => b.rating > 0) && !awayLog.some(a => a.rating > 0)) {
+      setLinkRes({
+        error: "Rate a few beans first so there's a taste profile to match against."
+      });
+      return;
+    }
+    setMatchLoading(true);
+    setLinkRes(null);
+    setLinkSaved({});
+    resetMatch();
+    const ctx = tasteContext(beans, awayLog, rStats, tasteGaps(beans, awayLog));
+    const system = "You are a specialty coffee buyer helping one person decide what to buy. You read the web page they give you and judge each coffee against their taste history. Only describe coffees that appear on the pages you read. Never invent a coffee, a price, a tasting note or a URL. Answer with one JSON object only.";
+    const prompt = ctx + `\n\nTASK: Read this page: ${url}\n` + "It is either ONE coffee's product page, or a shop or collection page listing many coffees.\n" + "- One coffee: describe it and judge the match.\n" + "- A shop page: the listing often shows only names and prices. Read the product pages of the most promising single-origin coffees (up to 5) to get origin, process, variety and tasting notes. Skip blends, flavored coffees and dark roasts unless this person rates those well. Rank the best matches, up to 6.\n" + "matchPct is your best-judgment estimate (0-100) of how likely this person is to love it, based on what they rate high and low. Say in why which of their beans it resembles, or what risk it carries. Skip coffees they already own. Many shop pages load stock status with scripts, so set inStock to null unless the page clearly says sold out (false).\n\n" + "Return ONLY this JSON:\n{\"kind\":\"single\" or \"list\",\"shop\":\"roaster or shop name\",\"summary\":\"one sentence on the overall fit\",\"picks\":[{\"name\":\"\",\"roaster\":\"\",\"url\":\"product page URL\",\"price\":\"price and bag size as shown\",\"origin\":\"\",\"process\":\"\",\"roast\":\"\",\"notes\":\"tasting notes from the page\",\"matchPct\":0,\"why\":\"one or two sentences\",\"inStock\":null}]}\nSort picks from best match to worst.";
+    const r = await callClaudeTools(system, prompt, [{
+      type: "web_fetch_20250910",
+      name: "web_fetch",
+      max_uses: 6,
+      max_content_tokens: 16000
+    }], 4000);
+    setMatchLoading(false);
+    if (r.error) {
+      setLinkRes({
+        error: r.error
+      });
+      return;
+    }
+    const data = extractJsonObject(r.text);
+    const picks = (data && data.picks || []).map(p => {
+      const c = cleanPick(p);
+      return c ? {
+        ...c,
+        url: c.url || (data && data.kind === "single" ? url : "")
+      } : null;
+    }).filter(Boolean).sort((a, b) => (b.matchPct ?? -1) - (a.matchPct ?? -1)).slice(0, 6);
+    if (!picks.length) {
+      setLinkRes({
+        error: (r.toolErr ? "The page couldn't be read (" + r.toolErr + "). " : "I couldn't find any coffees on that page. ") + "Some shops build their pages with scripts the reader can't see. Try the link to a single coffee instead, or scan the bag with a photo."
+      });
+      return;
+    }
+    setLinkRes({
+      url,
+      kind: data && data.kind === "single" && picks.length === 1 ? "single" : "list",
+      shop: data && typeof data.shop === "string" ? data.shop : "",
+      summary: data && typeof data.summary === "string" ? data.summary : "",
+      picks
+    });
+  };
+  const saveLinkPick = (p, i) => {
+    setMatchHistory(h => {
+      const nh = [{
+        name: p.name,
+        roaster: p.roaster,
+        origin: p.origin,
+        process: p.process,
+        roast: p.roast,
+        flavorProfile: p.notes,
+        matchPct: p.matchPct ?? 0,
+        reasoning: p.why,
+        url: p.url || linkRes.url,
+        price: p.price,
+        id: Date.now() + i,
+        date: new Date().toLocaleDateString()
+      }, ...h];
+      saveMatchHistory(nh);
+      return nh;
+    });
+    setLinkSaved(x => ({
+      ...x,
+      [i]: true
+    }));
+  };
   const runCompareAI = async compBeans => {
     setCompareLoading(true);
     setCompareResult("");
@@ -5358,13 +5441,24 @@ function App() {
       return `${b.name} (${b.origin || "?"}, ${b.process || "?"}, ${b.roast || "?"}) rated ${b.rating}/10 — dialed at ${m.dose}g/${m.water}g/${m.temp}°F${gl ? ", grind " + grindLabel(gl.position) : ""}${m.notes ? ". Notes: " + m.notes : ""}`;
     }).join("\n");
     const methodLabel = METHOD_LABELS[method];
+    let rangeCtx = "";
+    if (method === "espresso") {
+      const idx = beans.flatMap(b => (b.grindLogs?.espresso || []).map(g => grindIdx(g.position))).filter(v => v !== null && v < DOTS + 1 + DOTS);
+      if (idx.length) {
+        const lo = Math.min(...idx),
+          hi = Math.max(...idx),
+          srt = [...idx].sort((a, b) => a - b),
+          med = srt[Math.floor(srt.length / 2)];
+        rangeCtx = `\n\nMy espresso grinds across ${idx.length} logged settings run from ${grindLabel(idxToPos(lo))} to ${grindLabel(idxToPos(hi))}, most often around ${grindLabel(idxToPos(med))}. Start inside that range.`;
+      } else rangeCtx = "\n\nMy espresso shots on this grinder land between 0 and 0···. Start inside that range.";
+    }
     const prompt = `New, never-brewed bean: ${cur.name} by ${cur.roaster}. Origin: ${cur.origin || "unknown"}. Process: ${cur.process || "unknown"}. Roast: ${cur.roast || "unknown"}.${cur.altitude ? " Altitude: " + cur.altitude + "." : ""}${cur.varietal ? " Varietal: " + cur.varietal + "." : ""}${cur.flavorProfile ? " Flavor notes on bag: " + cur.flavorProfile + "." : ""}${decafNote(cur)}
 
 I want a starting point for ${methodLabel} on this bean. I haven't pulled a shot yet — don't waste my beans on a bad guess.
 
-${similar.length ? "Here's how similar beans from my collection are dialed in on this same grinder, which should inform the starting point:\n" + similarCtx : "No closely similar beans in my collection yet — base this on best practice for this origin/process/roast combination."}
+${similar.length ? "Here's how similar beans from my collection are dialed in on this same grinder, which should inform the starting point:\n" + similarCtx : "No closely similar beans in my collection yet — base this on best practice for this origin/process/roast combination."}${rangeCtx}
 
-Give me: dose, ${method === "espresso" ? "yield, time, temp, pre-brew" : method === "moccamaster" ? "water amount in ml, brew time" : "water amount, temp, " + (method === "aeropress" ? "steep time, press time" : method === "switch" ? "steep time with the switch closed, total time" : "bloom amount/time, total time")}, and a starting grind setting on a 0-12 scale (0-1 range for espresso). One or two sentences of reasoning tied to the bean's specific process/origin. Keep it tight.`;
+Give me: dose, ${method === "espresso" ? "yield, time, temp, pre-brew" : method === "moccamaster" ? "water amount in ml, brew time" : "water amount, temp, " + (method === "aeropress" ? "steep time, press time" : method === "switch" ? "steep time with the switch closed, total time" : "bloom amount/time, total time")}, and a starting grind setting ${method === "espresso" ? "written like 0, 0·, 0·· or 0··· (number plus dots)" : "on the 0-12 scale with dots"}. One or two sentences of reasoning tied to the bean's specific process/origin. Keep it tight.`;
     const r = await callClaude(systemFor(method), prompt);
     setStartPointResult(prev => ({
       ...prev,
@@ -5752,6 +5846,12 @@ Give me: dose, ${method === "espresso" ? "yield, time, temp, pre-brew" : method 
       .resume-note{margin:6px 14px 0;padding:10px 14px;border:1px solid var(--border);border-radius:var(--r);background:var(--bg2);color:var(--text2);font-size:13px;display:flex;gap:12px;align-items:center;justify-content:space-between;line-height:1.45;}
       .drill-modal{max-height:78vh;overflow-y:auto;}
       .rank-row{width:100%;text-align:left;color:inherit;}
+      .link-row{display:flex;gap:8px;margin-top:10px;}
+      .link-row input{flex:1;min-width:0;background:var(--bg2);border:1px solid var(--border);color:var(--text);font-family:var(--sans);font-size:16px;padding:10px 12px;border-radius:var(--rs);outline:none;}
+      .link-row input:focus{border-color:var(--gold);}
+      .link-row .btn{flex-shrink:0;}
+      .pick-rank{font-family:var(--mono);font-size:11px;letter-spacing:1.4px;text-transform:uppercase;color:var(--muted);}
+      .match-link-ic{width:36px;height:36px;border-radius:6px;border:1px solid var(--border);display:flex;align-items:center;justify-content:center;color:var(--gold);font-size:16px;flex-shrink:0;}
       .pill.tag{color:var(--gold);border-color:rgba(212,170,122,.45);}
       .method-row{overflow-x:auto;}
       .bimg{position:relative;overflow:hidden;}
@@ -8032,7 +8132,7 @@ Give me: dose, ${method === "espresso" ? "yield, time, temp, pre-brew" : method 
       marginTop: -4,
       marginBottom: 10
     }
-  }, "Snap a photo of a bag (one bag per photo) and see how well it fits your taste profile."), !matchPhoto && React.createElement("label", {
+  }, "Snap a photo of a bag, or paste a link to a coffee or a whole shop page, and see how well it fits your taste."), !matchPhoto && React.createElement("label", {
     className: "btn",
     style: {
       display: "inline-block"
@@ -8044,7 +8144,119 @@ Give me: dose, ${method === "espresso" ? "yield, time, temp, pre-brew" : method 
       display: "none"
     },
     onChange: scanMatchPhoto
-  })), matchPhoto && React.createElement("div", {
+  })), !matchPhoto && React.createElement("div", {
+    className: "link-row"
+  }, React.createElement("input", {
+    type: "url",
+    inputMode: "url",
+    autoCapitalize: "off",
+    autoCorrect: "off",
+    placeholder: "Paste a coffee or shop link",
+    value: matchUrl,
+    onChange: e => setMatchUrl(e.target.value),
+    onKeyDown: e => {
+      if (e.key === "Enter" && !matchLoading) matchLink();
+    }
+  }), React.createElement("button", {
+    className: "btn ai",
+    disabled: matchLoading || !matchUrl.trim(),
+    onClick: matchLink
+  }, matchLoading ? "Reading..." : "Match")), !matchPhoto && matchLoading && React.createElement(React.Fragment, null, React.createElement("div", {
+    className: "ai-loading",
+    style: {
+      marginTop: 10
+    }
+  }, React.createElement("div", {
+    className: "ai-dot"
+  }), React.createElement("div", {
+    className: "ai-dot"
+  }), React.createElement("div", {
+    className: "ai-dot"
+  })), React.createElement("div", {
+    style: {
+      fontSize: 11,
+      color: "var(--muted)",
+      marginTop: 6
+    }
+  }, "Reading the page", /collection|shop|coffees?\/?$|\/products\/?$/i.test(matchUrl) ? " and the coffees on it. A shop page can take up to a minute." : ".")), linkRes && linkRes.error && React.createElement("div", {
+    style: {
+      color: "var(--red)",
+      fontSize: 12,
+      marginTop: 10,
+      lineHeight: 1.5
+    }
+  }, linkRes.error), linkRes && !linkRes.error && React.createElement("div", {
+    style: {
+      marginTop: 14
+    }
+  }, (linkRes.shop || linkRes.summary) && React.createElement("div", {
+    className: "sec-txt",
+    style: {
+      fontSize: 13,
+      marginBottom: 10
+    }
+  }, linkRes.kind === "list" && linkRes.shop ? React.createElement("b", {
+    style: {
+      color: "var(--text)"
+    }
+  }, linkRes.shop, ": best ", linkRes.picks.length === 1 ? "match" : linkRes.picks.length + " matches", " for you. ") : null, linkRes.summary), linkRes.picks.map((p, i) => {
+    const rr = rStats.find(r => r.key === rKey(p.roaster));
+    return React.createElement("div", {
+      key: i,
+      className: "pick"
+    }, React.createElement("div", {
+      className: "pick-top"
+    }, React.createElement("span", {
+      className: "pick-rank"
+    }, linkRes.kind === "single" ? "This coffee" : "#" + (i + 1)), p.matchPct !== null && React.createElement("span", {
+      className: "pick-match"
+    }, p.matchPct, "%")), React.createElement("div", {
+      className: "pick-name"
+    }, p.name || "Unnamed coffee"), React.createElement("div", {
+      className: "pick-roaster"
+    }, p.roaster, rr && rr.rated > 0 ? " · you rate them " + rr.avg.toFixed(1) + " avg (" + rr.rated + (rr.rated === 1 ? " bean" : " beans") + ")" : ""), React.createElement("div", {
+      className: "pick-meta"
+    }, [p.origin, p.process, p.roast, p.price].filter(Boolean).join(" · ")), p.notes && React.createElement("div", {
+      className: "pick-notes"
+    }, p.notes), p.why && React.createElement("div", {
+      className: "pick-why"
+    }, p.why), React.createElement("div", {
+      className: "fa"
+    }, p.url && React.createElement("a", {
+      className: "btn sm",
+      href: p.url,
+      target: "_blank",
+      rel: "noopener noreferrer",
+      style: {
+        textDecoration: "none"
+      }
+    }, "Open page", p.inStock === false ? " (may be sold out)" : ""), React.createElement("button", {
+      className: "btn sm",
+      disabled: !!linkSaved[i],
+      onClick: () => saveLinkPick(p, i)
+    }, linkSaved[i] ? "✓ Saved" : "Save"), React.createElement("button", {
+      className: "btn p sm",
+      onClick: () => addSuggestion(p)
+    }, "Add to my beans")));
+  }), React.createElement("div", {
+    style: {
+      display: "flex",
+      justifyContent: "space-between",
+      alignItems: "center",
+      gap: 10
+    }
+  }, React.createElement("div", {
+    style: {
+      fontSize: 11,
+      color: "var(--muted)"
+    }
+  }, "Check the page for current price and stock."), React.createElement("button", {
+    className: "btn-link",
+    onClick: () => {
+      setLinkRes(null);
+      setMatchUrl("");
+    }
+  }, "Clear"))), matchPhoto && React.createElement("div", {
     style: {
       marginTop: 10
     }
@@ -8136,7 +8348,7 @@ Give me: dose, ${method === "espresso" ? "yield, time, temp, pre-brew" : method 
       alignItems: "center",
       gap: 10
     }
-  }, m.photo && React.createElement("img", {
+  }, m.photo ? React.createElement("img", {
     src: m.photo,
     style: {
       width: 36,
@@ -8144,13 +8356,22 @@ Give me: dose, ${method === "espresso" ? "yield, time, temp, pre-brew" : method 
       objectFit: "cover",
       borderRadius: 6
     }
-  }), React.createElement("div", null, React.createElement("div", {
+  }) : m.url ? React.createElement("div", {
+    className: "match-link-ic"
+  }, "↗") : null, React.createElement("div", null, React.createElement("div", {
     className: "ge-pos",
     style: {
       fontSize: 14,
       letterSpacing: 0
     }
-  }, m.name || "Unknown"), React.createElement("div", {
+  }, m.url ? React.createElement("a", {
+    href: m.url,
+    target: "_blank",
+    rel: "noopener noreferrer",
+    style: {
+      color: "inherit"
+    }
+  }, m.name || "Unknown") : m.name || "Unknown"), React.createElement("div", {
     className: "ge-date"
   }, m.roaster || "—", " · ", m.date))), React.createElement("div", {
     style: {
